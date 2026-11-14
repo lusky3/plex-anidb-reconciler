@@ -205,7 +205,18 @@ def test_report_csv_columns(env):
     mock_servers()
     res = go(env, apply=False)
     rows = list(csv.DictReader(res.report_path.open()))
-    assert list(rows[0]) == ["rule", "kind", "status", "rating_key", "file_id", "fid", "eids", "when", "reason"]
+    assert list(rows[0]) == [
+        "rule",
+        "kind",
+        "status",
+        "rating_key",
+        "file_id",
+        "fid",
+        "eids",
+        "when",
+        "reason",
+        "detail",
+    ]
     assert res.report_path == __import__("pathlib").Path(env["DATA_DIR"]) / "reports" / f"{res.run_id}.csv"
     r2 = next(r for r in rows if r["rule"] == "R2")
     assert (r2["file_id"], r2["fid"], r2["eids"], r2["status"]) == ("3", "3", "52", "dry_run")
@@ -390,3 +401,113 @@ def test_cli_unexpected_exception_exit_2_type_only(env, monkeypatch, capsys):
     assert cli.main(["plan"]) == 2
     err = capsys.readouterr().err
     assert "RuntimeError" in err and "PLEXSECRET" not in err
+
+
+# --- R2b that depends on an R2 planned in the same run ---
+
+T_EARLY = int(datetime(2026, 2, 1, tzinfo=UTC).timestamp())
+T_LATE = int(datetime(2026, 2, 2, tzinfo=UTC).timestamp())
+
+
+def dep_world(env_, *, detail_files=None):
+    """file 2 (rk b) gets R2 at T_EARLY; file 1 (rk a, same episode) an R2b at T_LATE that depends on it."""
+    write_mylist(env_, [snap(11, 50, None), snap(22, 50, None)])
+    files = [shoko_file(1, 11, 50), shoko_file(2, 22, 50)]
+    _, put, _ = mock_world(
+        files, [plex_item("a", 1, 1, T_LATE), plex_item("b", 2, 1, T_EARLY)], [("a", T_LATE), ("b", T_EARLY)]
+    )
+    if detail_files is not None:
+        mock_file_detail(detail_files)
+    return put
+
+
+def set_rows(res):
+    return [
+        (r["rule"], r["file_id"], r["status"], r["detail"])
+        for r in csv.DictReader(res.report_path.open())
+        if r["kind"] == "set_file_watched"
+    ]
+
+
+def put_paths(put):
+    return [c.request.url.path for c in put.calls]
+
+
+@respx.mock
+def test_r2_applied_before_dependent_r2b(env):
+    put = dep_world(env)
+    res = go(env, apply=True)
+    assert put_paths(put) == ["/api/v3/File/2/UserStats", "/api/v3/File/1/UserStats"]
+    assert res.counts == {"applied": 2}
+
+
+@respx.mock
+def test_cap_never_lets_dependent_r2b_run_first(env):
+    put = dep_world(env)
+    res = go(env, apply=True, limit=1)
+    assert put_paths(put) == ["/api/v3/File/2/UserStats"]
+    assert set_rows(res) == [("R2", "2", "applied", ""), ("R2b", "1", "capped", "")]
+
+
+@respx.mock
+def test_dependent_r2b_skipped_when_prerequisite_capped(env):
+    env["MAX_WRITES"] = "1"
+    put = dep_world(env)
+    respx.get(f"{PLEX}/library/sections/4/all").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "MediaContainer": {
+                    "Metadata": [plex_item("a", 1, 1, T_LATE), plex_item("b", 2, 1, T_EARLY), plex_item("c", 3, 0)]
+                }
+            },
+        )
+    )
+    # rk c (file 3, eid 51) is an R1: it runs first and takes the only write
+    respx.get(f"{SHOKO}/api/v3/File").mock(
+        return_value=httpx.Response(
+            200, json={"List": [shoko_file(1, 11, 50), shoko_file(2, 22, 50), shoko_file(3, 33, 51)]}
+        )
+    )
+    write_mylist(env, [snap(11, 50, None), snap(22, 50, None), snap(999, 51, "2023-03-01T21:00:00-05:00")])
+    res = go(env, apply=True)
+    assert put.call_count == 0
+    assert set_rows(res) == [("R2", "2", "capped", ""), ("R2b", "1", "skipped", "prerequisite_not_applied")]
+
+
+@respx.mock
+def test_rules_r2b_alone_skips_dependent(env):
+    put = dep_world(env)
+    res = go(env, apply=True, rules=frozenset({"R2b"}))
+    assert put.call_count == 0
+    assert set_rows(res) == [("R2b", "1", "skipped", "prerequisite_not_applied")]
+    db = Path(env["DATA_DIR"]) / "ledger.sqlite"
+    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM actions").fetchone() == (0,)
+
+
+@respx.mock
+def test_file_id_filter_skips_dependent_r2b(env):
+    put = dep_world(env)
+    res = go(env, apply=True, file_id=1)
+    assert put.call_count == 0
+    assert set_rows(res) == [("R2b", "1", "skipped", "prerequisite_not_applied")]
+
+
+@respx.mock
+def test_dependent_r2b_skipped_when_prerequisite_shoko_changed(env):
+    put = dep_world(env, detail_files=[shoko_file(1, 11, 50), shoko_file(2, 23, 50)])
+    res = go(env, apply=True)
+    assert put.call_count == 0
+    assert set_rows(res) == [
+        ("R2", "2", "failed", "shoko_changed"),
+        ("R2b", "1", "skipped", "prerequisite_not_applied"),
+    ]
+
+
+@respx.mock
+def test_dependent_r2b_dry_run_follows_prerequisite(env):
+    dep_world(env)
+    assert set_rows(go(env, apply=False)) == [("R2", "2", "dry_run", ""), ("R2b", "1", "dry_run", "")]
+    assert set_rows(go(env, apply=False, rules=frozenset({"R2b"}))) == [
+        ("R2b", "1", "skipped", "prerequisite_not_applied")
+    ]

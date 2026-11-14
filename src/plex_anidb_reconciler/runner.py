@@ -129,7 +129,7 @@ def _selected(a: Action, rules: frozenset[str] | None, file_id: int | None) -> b
     return (rules is None or a.rule in rules) and (file_id is None or a.file_id == file_id)
 
 
-def _finish(rows: list[tuple[Action, str]], report_path: Path) -> None:
+def _finish(rows: list[tuple[Action, str, str]], report_path: Path) -> None:
     write_report(rows, report_path)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
@@ -164,7 +164,7 @@ def run_once(
     if clients is None:
         own_http = httpx.Client(timeout=60)
         clients = build_clients(settings, own_http)
-    rows: list[tuple[Action, str]] = []
+    rows: list[tuple[Action, str, str]] = []
     changed = 0
     try:
         ledger = Ledger(Path(settings.data_dir) / "ledger.sqlite")
@@ -183,15 +183,22 @@ def run_once(
             )
             r1 = [a for a in actions if a.kind is ActionKind.MARK_PLEX_PLAYED]
             sets = [a for a in actions if a.kind is ActionKind.SET_FILE_WATCHED]
-            rows = [(a, "reported") for a in actions if a.kind is ActionKind.REPORT]
+            # every R2 before any R2b: an R2b may depend on an R2 of this run (Action.depends_on_file_id)
+            sets = [a for a in sets if a.rule != "R2b"] + [a for a in sets if a.rule == "R2b"]
+            rows = [(a, "reported", "") for a in actions if a.kind is ActionKind.REPORT]
             executable = [a for a in r1 + sets if _selected(a, rules, file_id)]
 
             cap = settings.max_writes if limit is None else min(limit, settings.max_writes)
             budget = max(cap, 0)
+            set_status: dict[int, str] = {}  # file_id -> status of its SET in this run
+            ok = "applied" if apply else "dry_run"
             for a in executable:
                 key = a.rating_key if a.kind is ActionKind.MARK_PLEX_PLAYED else a.file_id
+                detail = ""
                 if ledger.seen_success(a.kind, key):
                     status = "skipped_ledger"
+                elif a.depends_on_file_id is not None and set_status.get(a.depends_on_file_id) != ok:
+                    status, detail = "skipped", "prerequisite_not_applied"  # CSV only; reconsidered next run
                 elif not apply:
                     status = "dry_run"
                 elif budget <= 0:
@@ -201,7 +208,9 @@ def run_once(
                     status, detail = _execute(a, clients)
                     changed += detail == "shoko_changed"
                     ledger.record(run_id, a, status, detail)  # committed before the next write
-                rows.append((a, status))
+                if a.kind is ActionKind.SET_FILE_WATCHED and a.file_id is not None:
+                    set_status[a.file_id] = status
+                rows.append((a, status, detail))
         finally:
             ledger.close()
     finally:
@@ -211,7 +220,7 @@ def run_once(
     _finish(rows, report_path)
     summary = summarize(rows)
     print(summary)
-    counts = dict(Counter(s for _, s in rows))
+    counts = dict(Counter(s for _, s, _ in rows))
     if changed:
         counts["shoko_changed"] = changed
     snapshot = "ok" if fresh else "stale"

@@ -49,6 +49,9 @@ class Action:
     eids: tuple[int, ...]
     when: datetime | None
     reason: str
+    # An R2b whose episode counts as watched only because of an R2 planned in this same run: it may be
+    # executed only after that R2 (this Shoko file id) was applied in this run.
+    depends_on_file_id: int | None = None
 
 
 @dataclass(frozen=True)

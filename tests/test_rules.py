@@ -563,3 +563,60 @@ def test_many_conflicts_plan_quickly():
     # per episode: the earlier file gets R2, the later one an R2b gated on the earlier date
     assert [(a.rule, a.when) for a in sets(acts)] == [("R2", T1), ("R2b", T2)] * n
     assert reports(acts) == []
+
+
+# --- R2b that relies on an R2 planned in the same run carries that dependency ---
+
+
+def test_r2b_depends_on_r2_planned_in_same_run():
+    sc = Scenario(
+        items=[item("a", "/p/x.mkv", last=T2), item("b", "/p2/y.mkv", section=5, last=T1)],
+        files=[shoko(1, 11, [50], "/p/x.mkv"), shoko(2, 22, [50], "/p2/y.mkv")],
+        entries=[entry(11, 50, None), entry(22, 50, None)],
+        history={"a": [T2], "b": [T1]},
+    )
+    deps = {(a.rule, a.file_id): a.depends_on_file_id for a in sets(sc.run())}
+    assert deps == {("R2b", 1): 2, ("R2", 2): None}
+
+
+def test_r2b_with_snapshot_or_ledger_cutoff_has_no_dependency():
+    (a,) = s_r2b_after().run()
+    assert (a.rule, a.depends_on_file_id) == ("R2b", None)
+    sc = simple(
+        items=[item("a", "/p/x2.mkv", last=T2)],
+        files=[shoko(2, 777, [50], "/p/x2.mkv")],
+        entries=[entry(777, 50, None)],
+        history={"a": [T3]},
+    )
+    pending = [PendingWatch(file_id=1, fid=12345, eids=(50,), when=T1)]
+    (a,) = plan(sc.items, sc.history, PathMatcher(sc.files, []), sc.mylist(), "record", True, pending=pending)
+    assert (a.rule, a.depends_on_file_id) == ("R2b", None)
+
+
+def test_r2b_needing_two_planned_r2s_is_reported():
+    # A{50} and C{60} both get R2 this run; X{50,60} would need both to land first
+    sc = Scenario(
+        items=[
+            item("a", "/p/a.mkv", last=T1),
+            item("c", "/p/c.mkv", last=T1),
+            item("d", "/p/d.mkv", last=T3),
+            item("x", "/p/x.mkv", last=T2),
+        ],
+        files=[
+            shoko(1, 1, [50], "/p/a.mkv"),
+            shoko(3, 3, [60], "/p/c.mkv"),
+            shoko(4, 4, [60], "/p/d.mkv"),
+            shoko(9, 9, [50, 60], "/p/x.mkv"),
+        ],
+        entries=[entry(1, 50, None), entry(3, 60, None), entry(4, 60, None), entry(9, 50, None), entry(9, 60, None)],
+        history={"a": [T1], "c": [T1], "d": [T3], "x": [T2]},
+    )
+    acts = sc.run()
+    assert [(a.rule, a.file_id, a.depends_on_file_id) for a in sets(acts)] == [
+        ("R2", 1, None),
+        ("R2", 3, None),
+        ("R2b", 4, 3),
+    ]
+    assert [(a.rule, a.reason, a.file_id) for a in acts if a.kind is ActionKind.REPORT] == [
+        ("R2b", "multiple_prerequisites", 9)
+    ]

@@ -16,11 +16,14 @@ class _Watched:
     (this plan) that the snapshot cannot show yet. Pending fids count as watched; pending eids count
     as watched on their pending dates, so later files of those episodes go through the gated R2b path."""
 
-    def __init__(self, mylist: MyListIndex, pending: Iterable[PendingWatch]) -> None:
+    def __init__(
+        self, mylist: MyListIndex, pending: Iterable[PendingWatch], planned: Iterable[PendingWatch] = ()
+    ) -> None:
         self._ml = mylist
         self._fids: set[int] = set()
         self._views: dict[int, list[datetime]] = defaultdict(list)
-        for p in pending:
+        self._planned = list(planned)  # SETs planned in this run (not yet written)
+        for p in [*pending, *self._planned]:
             if p.fid:
                 self._fids.add(p.fid)
             for e in p.eids:
@@ -38,6 +41,12 @@ class _Watched:
 
     def watched_eids(self) -> frozenset[int]:
         return self._watched_eids
+
+    def planned_prerequisites(self, eids: Iterable[int]) -> set[int]:
+        """File ids of SETs planned in this run that cover any of these eids. A planned R2 only exists
+        for eids unwatched in the snapshot and ledger, so each one is needed for the eids to count."""
+        wanted = set(eids)
+        return {p.file_id for p in self._planned if wanted.intersection(p.eids)}
 
     def max_watch(self, eids: Iterable[int]) -> datetime | None:
         eids = list(eids)
@@ -61,8 +70,8 @@ def _report(rule: str, reason: str, rk: str, f: ShokoFile | None = None, when: d
     )
 
 
-def _set(rule: str, reason: str, rk: str, f: ShokoFile, when: datetime) -> Action:
-    return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason)
+def _set(rule: str, reason: str, rk: str, f: ShokoFile, when: datetime, depends_on: int | None = None) -> Action:
+    return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason, depends_on)
 
 
 def _resolve(item: PlexItem, matcher: PathMatcher) -> list[ShokoFile] | Action:
@@ -154,8 +163,13 @@ def _plan_item(
                 out.append(_report("R2b", "unknown_file_age", rk, f))
                 continue
             plays = [t for t in plays_all if cutoff is not None and t > cutoff and t > f.created_at]
-            if r2b_policy == "record" and plays and snapshot_fresh:
-                out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays)))
+            prereqs = mylist.planned_prerequisites(f.eids)
+            if r2b_policy == "record" and plays and snapshot_fresh and len(prereqs) > 1:
+                # would need several R2s of this run to land first: decide next run, once they are written
+                out.append(_report("R2b", "multiple_prerequisites", rk, f, min(plays)))
+            elif r2b_policy == "record" and plays and snapshot_fresh:
+                dep = next(iter(prereqs)) if prereqs else None
+                out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays), dep))
             elif r2b_policy != "record":
                 out.append(_report("R2b", "ignore_policy", rk, f))
             elif not plays:
@@ -243,7 +257,7 @@ def plan(
     committed: list[Action] = []
     while True:
         planned = [PendingWatch(a.file_id or 0, a.fid, a.eids, a.when) for a in committed if a.when is not None]
-        state = _Watched(mylist, [*pending, *planned])
+        state = _Watched(mylist, pending, planned)
         actions: list[Action] = []
         for item, res in resolved:
             actions.extend(_plan_item(item, res, history, r1_state, state, r2b_policy, snapshot_fresh, r1_marked))
