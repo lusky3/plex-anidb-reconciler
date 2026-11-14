@@ -98,6 +98,10 @@ def _parse_file(raw: dict, tz: ZoneInfo) -> ShokoFile:
     )
 
 
+# Marker of Shoko 5.3.3's "no stats yet" 404 body (plain text, a JSON string or ProblemDetails alike).
+_NO_USER_STATS = "fileuserstats"
+
+
 class ShokoClient:
     def __init__(self, base_url: str, api_key: str, tz: ZoneInfo, client: httpx.Client):
         self.base_url = base_url.rstrip("/")
@@ -105,11 +109,15 @@ class ShokoClient:
         self._client = client
         self._headers = {"apikey": api_key}
 
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Any HTTP response; transport errors become ShokoError (type name only)."""
         try:
-            resp = self._client.request(method, f"{self.base_url}{path}", headers=self._headers, **kwargs)
+            return self._client.request(method, f"{self.base_url}{path}", headers=self._headers, **kwargs)
         except httpx.HTTPError as exc:
             raise ShokoError(f"{method} {path} failed: {type(exc).__name__}") from None
+
+    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        resp = self._send(method, path, **kwargs)
         if not resp.is_success:
             raise ShokoError(f"{method} {path} returned HTTP {resp.status_code}")
         return resp
@@ -142,9 +150,18 @@ class ShokoClient:
             raise _bad_body(f"/api/v3/File/{file_id}", exc) from None
 
     def get_user_stats(self, file_id: int) -> ShokoUserStats:
-        """Shoko's current watched state of one file (read-only), checked right before a write."""
+        """Shoko's current watched state of one file (read-only), checked right before a write.
+
+        Shoko 5.3.3 (FileController.GetFileUserStats) answers 404 with the text/plain body
+        "No FileUserStats entry for the given fileID for the current user" for a file nobody has watched
+        yet: that is unwatched. Any other 404 (e.g. "No File entry for the given fileID"), any other error
+        status, a transport error or a malformed 2xx body raises ShokoError."""
         path = f"/api/v3/File/{file_id}/UserStats"
-        resp = self._request("GET", path)
+        resp = self._send("GET", path)
+        if resp.status_code == 404 and _NO_USER_STATS in resp.text.lower():
+            return ShokoUserStats(0, None)
+        if not resp.is_success:
+            raise ShokoError(f"GET {path} returned HTTP {resp.status_code}")
         try:
             return _parse_user_stats(resp.json(), self.tz)
         except PARSE_ERRORS as exc:

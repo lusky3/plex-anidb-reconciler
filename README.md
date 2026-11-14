@@ -37,6 +37,9 @@ Right before each Shoko write the reconciler re-reads the file (`GET /api/v3/Fil
 and path, else `failed`/`shoko_changed`) and its watched state (`GET /api/v3/File/{id}/UserStats`). If Shoko
 already has a `LastWatchedAt` or a non-zero `WatchedCount` for that file, nothing is written: the row is
 `skipped` with detail `shoko_already_watched` (an existing date is never overwritten; not a failure, no ledger row).
+Targeted Shoko version: 5.3.3, which answers the UserStats GET of a never-watched file with HTTP 404 and the
+text `No FileUserStats entry for the given fileID for the current user`; that is read as unwatched. Any other
+404 (e.g. `No File entry for the given fileID`) or error fails the write without a PUT.
 
 ## Docker
 

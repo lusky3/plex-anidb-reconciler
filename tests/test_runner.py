@@ -797,6 +797,26 @@ def test_shoko_unwatched_is_written_after_reading_user_stats(env):
 
 
 @respx.mock
+def test_no_user_stats_yet_404_is_written(env):
+    """Shoko 5.3.3: a never-watched file has no UserStats entry and the GET answers 404."""
+    _, put = mock_servers()
+    mock_user_stats({3: httpx.Response(404, text="No FileUserStats entry for the given fileID for the current user")})
+    res = go(env, apply=True)
+    assert res.counts == {"applied": 3}
+    assert put.call_count == 1
+
+
+@respx.mock
+def test_user_stats_file_missing_404_fails_without_write(env):
+    _, put = mock_servers()
+    mock_user_stats({3: httpx.Response(404, text="No File entry for the given fileID")})
+    res = go(env, apply=True)
+    assert put.call_count == 0
+    assert res.counts == {"applied": 2, "failed": 1}
+    assert set_rows(res) == [("R2", "3", "failed", "GET /api/v3/File/3/UserStats returned HTTP 404")]
+
+
+@respx.mock
 def test_malformed_user_stats_fails_without_write(env):
     _, put = mock_servers()
     mock_user_stats({3: httpx.Response(200, json={"WatchedCount": "lots"})})

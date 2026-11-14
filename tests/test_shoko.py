@@ -232,10 +232,51 @@ def test_get_user_stats_malformed_raises_shoko_error(response):
 
 
 @respx.mock
-def test_get_user_stats_http_error_raises():
-    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=httpx.Response(404))
-    with pytest.raises(ShokoError):
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404, text="No FileUserStats entry for the given fileID for the current user"),
+        httpx.Response(404, json="No FileUserStats entry for the given fileID for the current user"),
+        httpx.Response(
+            404,
+            json={"title": "Not Found", "status": 404, "detail": "No FileUserStats entry for the given fileID"},
+            headers={"Content-Type": "application/problem+json"},
+        ),
+        httpx.Response(404, text="no fileuserstats ENTRY"),
+    ],
+    ids=["plain_text", "json_string", "problem_details", "other_case"],
+)
+def test_get_user_stats_missing_stats_404_is_unwatched(response):
+    """Shoko 5.3.3 answers 404 'No FileUserStats entry ...' for a file nobody has watched yet."""
+    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=response)
+    stats = make_client().get_user_stats(7)
+    assert (stats.watched_count, stats.last_watched_at, stats.watched) == (0, None, False)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404, text="No File entry for the given fileID"),
+        httpx.Response(404),
+        httpx.Response(500, text="No FileUserStats entry"),
+        httpx.Response(401),
+    ],
+    ids=["file_missing", "empty_404", "server_error", "unauthorised"],
+)
+def test_get_user_stats_other_errors_raise(response):
+    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=response)
+    with pytest.raises(ShokoError) as exc:
         make_client().get_user_stats(7)
+    assert f"HTTP {response.status_code}" in str(exc.value) and "SECRETKEY" not in str(exc.value)
+
+
+@respx.mock
+def test_get_user_stats_transport_error_raises():
+    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(side_effect=httpx.ConnectError("SECRETKEY"))
+    with pytest.raises(ShokoError) as exc:
+        make_client().get_user_stats(7)
+    assert "SECRETKEY" not in str(exc.value)
 
 
 @respx.mock
