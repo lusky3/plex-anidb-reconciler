@@ -166,6 +166,8 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
                 self._json(404, {"error": "not found"})
 
         def log_message(self, format: str, *args) -> None:
+            # Intentionally empty: silences BaseHTTPRequestHandler's per-request stderr access log
+            # (one line per /healthz probe). Runs are logged by the service itself.
             pass
 
     server_cls = ThreadingHTTPServer
