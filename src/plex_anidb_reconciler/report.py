@@ -66,12 +66,22 @@ def no_file_state(fid: int | None) -> MyListFileState | None:
     return None
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: object) -> object:
+    """Spreadsheet apps run cells starting with = + - @ (or tab/CR) as formulas: prefix them with '."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 def write_report(outcomes: list[Outcome], path: Path, file_state: FileStateLookup = no_file_state) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(COLUMNS)
-        writer.writerows(report_row(outcome, file_state) for outcome in outcomes)
+        writer.writerows([_csv_safe(v) for v in report_row(outcome, file_state)] for outcome in outcomes)
 
 
 _HTML_STYLE = (

@@ -115,3 +115,35 @@ def test_prune_failures_logged_at_debug(tmp_path, monkeypatch, caplog):
     assert caplog.text.count("old report not removed (PermissionError)") == 2
     assert "secret path" not in caplog.text
     assert len(list(tmp_path.iterdir())) == 3
+
+
+def test_csv_neutralises_formula_cells(tmp_path):
+    import csv
+
+    from plex_anidb_reconciler.report import write_report
+
+    action = Action(
+        kind=ActionKind.REPORT,
+        rule="R4",
+        rating_key="=HYPERLINK(1)",
+        file_id=None,
+        fid=None,
+        eids=(),
+        when=None,
+        reason="+cmd",
+        release_group="@SUM(A1)",
+    )
+    path = tmp_path / "r.csv"
+    write_report(
+        [Outcome(action, "reported", "-1+1"), Outcome(_act(ActionKind.REPORT, "R4", "\tx"), "reported", "\rx")], path
+    )
+    with path.open(newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert (rows[0]["rating_key"], rows[0]["reason"], rows[0]["detail"], rows[0]["release_group"]) == (
+        "'=HYPERLINK(1)",
+        "'+cmd",
+        "'-1+1",
+        "'@SUM(A1)",
+    )
+    assert (rows[1]["reason"], rows[1]["detail"]) == ("'\tx", "'\rx")
+    assert rows[1]["rule"] == "R4" and rows[1]["eids"] == ""  # ordinary and empty cells unchanged
