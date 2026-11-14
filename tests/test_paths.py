@@ -64,7 +64,7 @@ def test_duplicate_exact_path_is_ambiguous():
     assert PathMatcher([a, b], []).lookup("/mnt/media/TV/A/x.mkv") == Ambiguous((3, 7))
 
 
-# --- G1: lookup() says whether a hit was exact (after PATH_MAP) or the parent+filename fallback ---
+# --- lookup() says whether a hit was exact (after PATH_MAP) or the parent+filename fallback ---
 
 
 def test_lookup_exact_hit_carries_shoko_path():

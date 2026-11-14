@@ -313,9 +313,10 @@ def write_mylist(env_, rows):
 R1_TIME = datetime(2026, 3, 1, 12, tzinfo=UTC)
 
 
-def test_c1_reconciler_scrobble_never_becomes_anidb_date(env):
-    """Ruling 15: run 1 marks Plex played via R1; later the other release's MyList row disappears.
-    Plex lastViewedAt is the reconciler's own scrobble time: it must not be written to AniDB."""
+def test_reconciler_scrobble_never_becomes_anidb_date(env):
+    """Run 1 marks the Plex item played via R1 (the episode was watched through another release); later
+    that release's MyList row disappears. The item's Plex lastViewedAt is now the reconciler's own scrobble
+    time, not a real watch of this file: it must not be written to AniDB."""
     env["SHOKO_INDEX_TTL_MIN"] = "0"
     files = [shoko_file(1, 1, 50)]
     write_mylist(env, [snap(999, 50, "2023-03-01T21:00:00-05:00"), snap(1, 50, None)])
@@ -332,8 +333,8 @@ def test_c1_reconciler_scrobble_never_becomes_anidb_date(env):
     assert [(r["rule"], r["reason"], r["status"]) for r in rows] == [("R4", "plex_marked_by_reconciler", "reported")]
 
 
-def test_i1_applied_set_gates_upgraded_file_until_snapshot_catches_up(env):
-    """Ruling 16: run 1 writes fid 1 (eid 50) via R2. The file is then upgraded to fid 2 before the
+def test_applied_set_gates_upgraded_file_until_snapshot_catches_up(env):
+    """Run 1 writes fid 1 (eid 50) via R2. The file is then upgraded to fid 2 before the
     snapshot shows the write; the old play date must not be copied to the new file."""
     env["SHOKO_INDEX_TTL_MIN"] = "0"
     play = int(datetime(2026, 2, 1, tzinfo=UTC).timestamp())
@@ -363,7 +364,7 @@ def test_i1_applied_set_gates_upgraded_file_until_snapshot_catches_up(env):
     ids=["fid", "eids", "manual_link", "no_fid", "path_moved", "no_paths"],
 )
 @respx.mock
-def test_m2_shoko_changed_since_index_blocks_write(env, current):
+def test_shoko_changed_since_index_blocks_write(env, current):
     _, put = mock_servers()
     mock_file_detail([shoko_file(1, 1, 50), shoko_file(2, 2, 51), current])
     res = go(env, apply=True)
@@ -374,7 +375,7 @@ def test_m2_shoko_changed_since_index_blocks_write(env, current):
 
 
 @respx.mock
-def test_m2_recheck_reads_current_file_before_write(env):
+def test_recheck_reads_current_file_before_write(env):
     _, put = mock_servers()
     res = go(env, apply=True)
     assert put.call_count == 1 and res.counts == {"applied": 3}
@@ -382,7 +383,7 @@ def test_m2_recheck_reads_current_file_before_write(env):
     assert get.url.params["includeDataFrom"] == "AniDB"
 
 
-# --- I2 (ruling 18): canary filters ---
+# --- --rules/--file-id filters: a canary can reach R2 directly ---
 
 
 @respx.mock
@@ -422,7 +423,7 @@ def test_cli_rules_and_file_id_flags(env, monkeypatch):
         cli.main(["apply", "--rules", "R4"])
 
 
-# --- I3 (ruling 17): ledger only holds writes; dry run uncapped; reports pruned ---
+# --- the ledger only holds real writes; dry runs are uncapped; old reports are pruned ---
 
 
 @respx.mock

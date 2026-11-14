@@ -428,7 +428,7 @@ def test_scenarios_cover_all_action_kinds():
     assert kinds == set(ActionKind)
 
 
-# --- C1 (ruling 15): R1-marked items never use lastViewedAt as an AniDB date ---
+# --- items the reconciler marked played (R1) never use lastViewedAt as an AniDB date ---
 
 
 def test_r1_marked_item_without_history_reports_not_sets():
@@ -447,7 +447,7 @@ def test_r1_marked_item_with_history_uses_history_only():
     assert (a.rule, a.when) == ("R2", T2)
 
 
-# --- I1 (ruling 16): applied SETs not yet in the snapshot count as watched ---
+# --- applied SETs not yet in the snapshot count as watched ---
 
 
 def test_pending_fid_is_treated_as_watched():
@@ -622,7 +622,7 @@ def test_r2b_needing_two_planned_r2s_is_reported():
     ]
 
 
-# --- G1: a parent-dir+filename fallback never drives a write ---
+# --- a parent-dir+filename fallback never drives a write ---
 
 
 def _fallback(views=1, entries=(), history=None):
@@ -652,7 +652,7 @@ def test_exact_match_unaffected():
     assert r1.kind is ActionKind.MARK_PLEX_PLAYED
 
 
-# --- G2: SETs carry the exact Shoko path they were matched on (re-checked before the write) ---
+# --- SETs carry the exact Shoko path they were matched on (re-checked before the write) ---
 
 
 def test_sets_carry_matched_shoko_path():
@@ -669,7 +669,7 @@ def test_matched_path_is_the_rewritten_shoko_path():
     assert (a.rule, a.matched_path) == ("R2", "/shoko/x.mkv")
 
 
-# --- G3: the snapshot-vs-Shoko eid check runs before R1 ---
+# --- the snapshot-vs-Shoko eid check runs before R1 ---
 
 
 def test_eid_mismatch_blocks_r1():
