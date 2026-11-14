@@ -20,7 +20,8 @@ COPY src ./src
 # Install the project, then drop parts of the standalone CPython the service never uses (GUI, IDE,
 # headers, installers). pip goes too: the runtime needs no package installer, and its vendored
 # certifi/urllib3/msgpack lag behind the app's own (locked) dependencies.
-RUN uv sync --locked --no-dev --no-editable \
+RUN set -eu \
+    && uv sync --locked --no-dev --no-editable \
     && mkdir -p /out/data \
     && py="$(readlink -f /app/.venv/bin/python | sed 's#/bin/python[0-9.]*$##')/" \
     && test -d "${py}lib" \
