@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1
-# Runtime is distroless (glibc + CA certs only: no shell, no package manager) with a
+# Runtime is distroless cc (glibc, libgcc/libstdc++, CA certs, tzdata; no shell, no package manager) with a
 # uv-managed standalone CPython 3.14, because distroless/python3 ships Debian's 3.11.
 # Base images are pinned by digest; Dependabot keeps them current.
 
@@ -15,9 +14,9 @@ WORKDIR /app
 # Interpreter version comes from .python-version (3.14).
 COPY .python-version pyproject.toml uv.lock README.md ./
 RUN uv python install \
-    && uv sync --frozen --no-dev --no-install-project
+    && uv sync --locked --no-dev --no-install-project
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable \
+RUN uv sync --locked --no-dev --no-editable \
     && mkdir -p /out/data
 # Drop parts of the standalone CPython the service never uses (GUI, IDE, headers, installers).
 # pip goes too: the runtime needs no package installer, and its vendored certifi/urllib3/msgpack

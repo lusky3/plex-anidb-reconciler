@@ -9,6 +9,9 @@ services:
     # capabilities, no privilege escalation. All state lives in the /data volume.
     user: "10001:10001"
     read_only: true
+    # Scratch space for Python/SQLite temp files, so nothing transient lands in the persistent /data volume.
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev,noexec
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true

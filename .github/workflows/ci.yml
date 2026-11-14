@@ -6,9 +6,16 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly rebuild on main so base-image (OS, CA, tzdata) fixes reach GHCR without a code change.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -21,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: uv sync --python 3.14
+      - run: uv sync --locked --python 3.14
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run pytest -v --cov=plex_anidb_reconciler --cov-report=xml --cov-report=term
@@ -31,30 +38,98 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  # Builds, smoke-tests and scans the image. Read-only token: it runs pull-request code.
   image:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # push to GHCR (only used on push events, never on pull requests)
-    env:
-      PUBLISH: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: plex-anidb-reconciler:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (hardened runtime flags)
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
+            plex-anidb-reconciler:ci --help
+          if docker run --rm --entrypoint sh plex-anidb-reconciler:ci -c true 2>/dev/null; then
+            echo "image unexpectedly contains a shell"; exit 1
+          fi
+          test "$(docker inspect plex-anidb-reconciler:ci --format '{{.Config.User}}')" = "10001:10001"
+      - name: Config error exits 1 without leaking values
+        run: |
+          set +e
+          out=$(docker run --rm --read-only --tmpfs /tmp -e SHOKO_API_KEY=CANARYSECRET plex-anidb-reconciler:ci plan 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" -eq 1
+          ! grep -q CANARYSECRET <<<"$out"
+      # Covers the distroless OS packages and the app's Python dependencies. Trivy cannot see inside the
+      # standalone CPython (or its static OpenSSL/SQLite); those update when the pinned uv image is bumped.
+      - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: plex-anidb-reconciler:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      # Pull requests: SBOM + provenance exported as a workflow artifact (nothing is pushed).
+      - if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          sbom: true
+          provenance: mode=max
+          outputs: type=local,dest=build-out
+          cache-from: type=gha
+      - if: github.event_name == 'pull_request'
+        name: Collect attestations
+        run: |
+          mkdir -p sbom
+          cp build-out/sbom*.json build-out/provenance.json sbom/
+          ls -la sbom
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom/
+          if-no-files-found: error
 
+  # Publishes to GHCR with SBOM + provenance attestations and OCI labels/annotations.
+  # Never runs for pull requests, so only this job holds a package-write token.
+  publish:
+    needs: image
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         env:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ${{ env.IMAGE }}
+          # `latest` tracks main only (not release tags).
+          flavor: latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=long
@@ -67,74 +142,12 @@ jobs:
           annotations: |
             org.opencontainers.image.title=plex-anidb-reconciler
             org.opencontainers.image.description=Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko
-
-      # 1. Build once into the runner's Docker for smoke tests and the vulnerability gate.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          tags: plex-anidb-reconciler:ci
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Smoke test (hardened runtime flags)
-        run: |
-          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true plex-anidb-reconciler:ci --help
-          if docker run --rm --entrypoint sh plex-anidb-reconciler:ci -c true 2>/dev/null; then
-            echo "image unexpectedly contains a shell"; exit 1
-          fi
-          test "$(docker inspect plex-anidb-reconciler:ci --format '{{.Config.User}}')" = "10001:10001"
-      - name: Config error exits 1 without leaking values
-        run: |
-          set +e
-          out=$(docker run --rm --read-only -e SHOKO_API_KEY=CANARYSECRET plex-anidb-reconciler:ci plan 2>&1)
-          code=$?
-          set -e
-          echo "$out"
-          test "$code" -eq 1
-          ! grep -q CANARYSECRET <<<"$out"
-      - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: plex-anidb-reconciler:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-
-      # 2a. Pull requests: SBOM + provenance exported as a workflow artifact (nothing pushed).
-      - if: env.PUBLISH != 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          sbom: true
-          provenance: mode=max
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=local,dest=build-out
-          cache-from: type=gha
-      - if: env.PUBLISH != 'true'
-        name: Collect attestations
-        run: |
-          mkdir -p sbom
-          cp build-out/sbom*.json build-out/provenance.json sbom/
-          ls -la sbom
-      - if: env.PUBLISH != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sbom-${{ github.sha }}
-          path: sbom/
-          if-no-files-found: error
-
-      # 2b. main and v* tags: push to GHCR with SBOM + provenance attestations attached.
-      - if: env.PUBLISH == 'true'
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - if: env.PUBLISH == 'true'
-        id: push
+      - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -146,6 +159,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
-      - if: env.PUBLISH == 'true'
-        name: Show published attestations
-        run: docker buildx imagetools inspect "${IMAGE}@${{ steps.push.outputs.digest }}" --format '{{ json .SBOM.SPDX.name }}'
+      - name: Verify attestations on the pushed image
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+        run: |
+          sbom=$(docker buildx imagetools inspect "$REF" --format '{{ json .SBOM.SPDX.creationInfo }}')
+          prov=$(docker buildx imagetools inspect "$REF" --format '{{ json .Provenance.SLSA.buildDefinition.buildType }}')
+          echo "SBOM creationInfo: $sbom"
+          echo "Provenance buildType: $prov"
+          test "$sbom" != "null" && test -n "$sbom"
+          test "$prov" != "null" && test -n "$prov"
