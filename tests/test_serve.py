@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from plex_anidb_reconciler.serve import Service, make_server
 
 
@@ -16,6 +18,7 @@ class FakeResult:
     run_id: str
     counts: dict
     report_path: Path = Path("r.json")
+    snapshot: str = "ok"
 
 
 def make_service(run_fn):
@@ -50,7 +53,7 @@ def test_trigger_coalesces_concurrent_requests():
 
     def run_fn(settings, **kw):
         calls.append(kw)
-        gate.wait(1)
+        gate.wait(30)  # released by the test; the bound only keeps a broken test from hanging forever
         return FakeResult(f"r{len(calls)}", {"moved": 1})
 
     svc = make_service(run_fn)
@@ -81,7 +84,12 @@ def test_healthz_reports_last_run():
     server, base = start_http(svc)
     try:
         with urllib.request.urlopen(base + "/healthz", timeout=2) as r:
-            assert json.loads(r.read()) == {"last_run_id": None, "last_status": None, "last_finished": None}
+            assert json.loads(r.read()) == {
+                "last_run_id": None,
+                "last_status": None,
+                "last_finished": None,
+                "snapshot": None,
+            }
         svc.run_pending_now()
         with urllib.request.urlopen(base + "/healthz", timeout=2) as r:
             body = json.loads(r.read())
@@ -89,11 +97,11 @@ def test_healthz_reports_last_run():
             "last_run_id": "abc",
             "last_status": "ok",
             "last_finished": "2026-01-01T00:00:00+00:00",
+            "snapshot": "ok",
         }
-        try:
+        with pytest.raises(urllib.error.HTTPError) as ei:
             urllib.request.urlopen(base + "/nope", timeout=2)
-        except urllib.error.HTTPError as e:
-            assert e.code == 404
+        assert ei.value.code == 404
     finally:
         server.shutdown()
         server.server_close()
@@ -140,3 +148,22 @@ def test_runs_never_overlap():
     for t in threads:
         t.join(2)
     assert peak == 1
+
+
+def test_healthz_surfaces_stale_and_unavailable_snapshot():
+    results = iter(
+        [FakeResult("a", {}, snapshot="stale"), FakeResult("b", {"snapshot_unavailable": 1}, snapshot="unavailable")]
+    )
+    svc = make_service(lambda s, **kw: next(results))
+    svc.run_pending_now()
+    assert svc.health()["snapshot"] == "stale"
+    svc.run_pending_now()
+    assert svc.health()["snapshot"] == "unavailable"
+
+
+def test_handler_has_socket_timeout():
+    server = make_server(make_service(lambda s, **kw: None), "127.0.0.1", 0)
+    try:
+        assert server.RequestHandlerClass.timeout == 10
+    finally:
+        server.server_close()

@@ -8,6 +8,7 @@ import httpx
 from plex_anidb_reconciler.models import PlexItem
 
 PAGE_SIZE = 500
+MAX_PAGES = 1000
 OWNER_ACCOUNT_ID = 1
 
 
@@ -40,18 +41,26 @@ class PlexClient:
     def _paged(self, path: str, params: dict[str, str]) -> list[dict]:
         out: list[dict] = []
         start = 0
-        while True:
+        first_keys: set[str] = set()
+        for _ in range(MAX_PAGES):
             headers = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(PAGE_SIZE)}
             try:
                 container = self._request(path, params, headers).json()["MediaContainer"]
             except ValueError, KeyError, TypeError:
                 raise PlexError(f"GET {path} returned an unexpected body") from None
             items = container.get("Metadata") or []
+            if not items:
+                return out
+            first = str(items[0].get("ratingKey")) if isinstance(items[0], dict) else ""
+            if first in first_keys:
+                raise PlexError(f"GET {path} pagination did not advance")
+            first_keys.add(first)
             out.extend(items)
             start += len(items)
             total = container.get("totalSize")
             if len(items) < PAGE_SIZE or (total is not None and start >= total):
                 return out
+        raise PlexError(f"GET {path} pagination exceeded {MAX_PAGES} pages")
 
     def list_episodes(self, section: int) -> list[PlexItem]:
         raw = self._paged(f"/library/sections/{section}/all", {"type": "4"})

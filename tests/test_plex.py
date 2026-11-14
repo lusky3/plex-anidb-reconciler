@@ -103,3 +103,41 @@ def test_transport_error_hides_details():
         make_client().mark_played("1")
     assert TOKEN not in str(ei.value)
     assert "ConnectError" in str(ei.value)
+
+
+@respx.mock
+def test_paged_stops_on_empty_page_without_total():
+    full = {"MediaContainer": {"Metadata": [{"ratingKey": str(i)} for i in range(500)]}}
+    route = respx.get(f"{BASE}/library/sections/5/all").mock(
+        side_effect=[httpx.Response(200, json=full), httpx.Response(200, json={"MediaContainer": {}})]
+    )
+    assert len(make_client().list_episodes(5)) == 500
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_paged_raises_when_server_ignores_offset():
+    full = {"MediaContainer": {"Metadata": [{"ratingKey": str(i)} for i in range(500)]}}
+    route = respx.get(f"{BASE}/library/sections/5/all").mock(return_value=httpx.Response(200, json=full))
+    with pytest.raises(PlexError, match="pagination"):
+        make_client().list_episodes(5)
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_paged_hard_page_cap(monkeypatch):
+    from plex_anidb_reconciler import plex
+
+    monkeypatch.setattr(plex, "MAX_PAGES", 3)
+    counter = iter(range(10**6))
+
+    def page(request):
+        base = next(counter) * 500
+        return httpx.Response(
+            200, json={"MediaContainer": {"Metadata": [{"ratingKey": str(base + i)} for i in range(500)]}}
+        )
+
+    route = respx.get(f"{BASE}/library/sections/5/all").mock(side_effect=page)
+    with pytest.raises(PlexError, match="pagination"):
+        make_client().list_episodes(5)
+    assert route.call_count == 3

@@ -32,7 +32,7 @@ class Service:
         self._clock = clock
         self._lock = threading.Lock()  # the only guard around run_fn
         self._event = threading.Event()  # pending-run flag; coalesces triggers
-        self._state: dict = {"last_run_id": None, "last_status": None, "last_finished": None}
+        self._state: dict = {"last_run_id": None, "last_status": None, "last_finished": None, "snapshot": None}
         self._state_lock = threading.Lock()
 
     def request_run(self) -> None:
@@ -46,9 +46,11 @@ class Service:
         """Run one reconcile (blocking if one is in flight). Never raises."""
         with self._lock:
             run_id = None
+            snapshot = None
             try:
                 result = self._run_fn(self.settings, apply=True, limit=None, now=self._clock())
                 run_id = result.run_id
+                snapshot = getattr(result, "snapshot", None)
                 status = "failed" if result.counts.get("failed") else "ok"
             except Exception as exc:  # noqa: BLE001 - daemon must survive any run failure
                 status = f"error:{type(exc).__name__}"  # type only: messages may contain URLs
@@ -56,6 +58,7 @@ class Service:
             with self._state_lock:
                 if run_id is not None:
                     self._state["last_run_id"] = run_id
+                    self._state["snapshot"] = snapshot  # ok | stale | unavailable
                 self._state["last_status"] = status
                 self._state["last_finished"] = self._clock().isoformat()
 
@@ -71,6 +74,8 @@ class Service:
 
 def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
+        timeout = 10  # a stalled client cannot pin a handler thread
+
         def _json(self, code: int, body: dict) -> None:
             data = json.dumps(body).encode()
             self.send_response(code)
