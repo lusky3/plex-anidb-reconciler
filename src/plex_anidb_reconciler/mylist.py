@@ -13,34 +13,55 @@ class SnapshotError(Exception):
     """The MyList snapshot is missing, unreadable, or malformed."""
 
 
-def _parse_viewed_at(value: object, path: Path) -> datetime | None:
+class _BadEntry(Exception):
+    """One snapshot entry is malformed (the message names the problem, never a value)."""
+
+
+def _parse_viewed_at(value: object) -> datetime | None:
     if value is None:
         return None
+    if not isinstance(value, str):
+        raise _BadEntry("invalid ViewedAt timestamp")
     try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError as exc:
-        raise SnapshotError(f"{path}: invalid ViewedAt timestamp") from exc
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise _BadEntry("invalid ViewedAt timestamp") from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise SnapshotError(f"{path}: ViewedAt has no timezone offset")
+        raise _BadEntry("ViewedAt has no timezone offset")
     return parsed
 
 
-def _parse_entry(raw: object, path: Path) -> MyListEntry:
-    if not isinstance(raw, dict):
-        raise SnapshotError(f"{path}: entry is not an object")
+def _as_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise _BadEntry(f"{name} is not an integer")
     try:
-        return MyListEntry(
-            fid=raw.get("FileID") or None,
-            eid=raw.get("EpisodeID"),
-            aid=raw.get("AnimeID"),
-            viewed_at=_parse_viewed_at(raw.get("ViewedAt"), path),
-            state=int(raw.get("State") or 0),
-        )
-    except (TypeError, ValueError) as exc:
-        raise SnapshotError(f"{path}: malformed entry") from exc
+        return int(value)
+    except ValueError:
+        raise _BadEntry(f"{name} is not an integer") from None
+
+
+def _opt_int(raw: dict, name: str) -> int | None:
+    value = raw.get(name)
+    return None if value is None else _as_int(value, name)
+
+
+def _parse_entry(raw: object) -> MyListEntry:
+    if not isinstance(raw, dict):
+        raise _BadEntry("entry is not an object")
+    if raw.get("State") is None:
+        raise _BadEntry("State is missing")
+    return MyListEntry(
+        fid=_opt_int(raw, "FileID") or None,  # FileID 0 = generic entry (no file)
+        eid=_opt_int(raw, "EpisodeID"),
+        aid=_opt_int(raw, "AnimeID"),
+        viewed_at=_parse_viewed_at(raw.get("ViewedAt")),
+        state=_as_int(raw["State"], "State"),
+    )
 
 
 def load_mylist(path: Path) -> list[MyListEntry]:
+    """Parse the snapshot. Any malformed entry rejects the whole snapshot (fail closed): silently
+    dropping an entry could hide a watched episode and lead to a duplicate dated MyList entry."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -53,12 +74,29 @@ def load_mylist(path: Path) -> list[MyListEntry]:
         raise SnapshotError(f"{path}: invalid JSON") from exc
     if not isinstance(data, list):
         raise SnapshotError(f"{path}: expected a JSON array")
-    return [_parse_entry(raw, path) for raw in data]
+    entries: list[MyListEntry] = []
+    bad: list[tuple[int, str]] = []
+    for i, raw in enumerate(data):
+        try:
+            entries.append(_parse_entry(raw))
+        except _BadEntry as exc:
+            bad.append((i, str(exc)))
+    if bad:
+        first_index, first_problem = bad[0]
+        raise SnapshotError(
+            f"{path}: {len(bad)} malformed entr{'y' if len(bad) == 1 else 'ies'}"
+            f" (first at index {first_index}: {first_problem}); snapshot rejected"
+        )
+    return entries
 
 
 def snapshot_age(path: Path, now: datetime) -> timedelta:
-    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=now.tzinfo)
-    return now - mtime
+    """Age of the snapshot by mtime. A future mtime (clock skew between hosts) counts as age zero."""
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=now.tzinfo)
+    except OSError as exc:
+        raise SnapshotError(f"{path}: cannot stat snapshot ({exc.strerror or type(exc).__name__})") from exc
+    return max(now - mtime, timedelta(0))
 
 
 class MyListIndex:
