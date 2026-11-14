@@ -1,17 +1,55 @@
-FROM python:3.14-slim AS build
-COPY --from=ghcr.io/astral-sh/uv:0.13.4 /uv /usr/local/bin/uv
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
-WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+# syntax=docker/dockerfile:1
+# Runtime is distroless (glibc + CA certs only: no shell, no package manager) with a
+# uv-managed standalone CPython 3.14, because distroless/python3 ships Debian's 3.11.
+# Base images are pinned by digest; Dependabot keeps them current.
 
-FROM python:3.14-slim
-RUN useradd --system --uid 10001 --no-create-home pxar \
-    && mkdir /data && chown pxar /data
+FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b AS uv
+
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS build
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+WORKDIR /app
+# Interpreter version comes from .python-version (3.14).
+COPY .python-version pyproject.toml uv.lock README.md ./
+RUN uv python install \
+    && uv sync --frozen --no-dev --no-install-project
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable \
+    && mkdir -p /out/data
+# Drop parts of the standalone CPython the service never uses (GUI, IDE, headers, installers).
+# pip goes too: the runtime needs no package installer, and its vendored certifi/urllib3/msgpack
+# lag behind the app's own (locked) dependencies.
+RUN set -eu; py="$(readlink -f /app/.venv/bin/python | sed 's#/bin/python[0-9.]*$##')/"; \
+    test -d "${py}lib"; \
+    rm -rf /python/.lock /python/.temp /python/.gitignore \
+        "$py"include "$py"share "$py"lib/tcl* "$py"lib/tk* "$py"lib/itcl* "$py"lib/thread* \
+        "$py"lib/python3.*/idlelib "$py"lib/python3.*/tkinter "$py"lib/python3.*/turtledemo \
+        "$py"lib/python3.*/turtle.py "$py"lib/python3.*/ensurepip "$py"lib/python3.*/pydoc_data \
+        "$py"lib/python3.*/lib-dynload/_tkinter*.so \
+        "$py"lib/python3.*/site-packages/pip "$py"lib/python3.*/site-packages/pip-*.dist-info \
+        "$py"bin/pip*
+
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
+LABEL org.opencontainers.image.title="plex-anidb-reconciler" \
+      org.opencontainers.image.description="Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko" \
+      org.opencontainers.image.source="https://github.com/lusky3/plex-anidb-reconciler" \
+      org.opencontainers.image.url="https://github.com/lusky3/plex-anidb-reconciler" \
+      org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/runbook.md" \
+      org.opencontainers.image.vendor="lusky3" \
+      org.opencontainers.image.base.name="gcr.io/distroless/cc-debian13:nonroot"
+# The venv's interpreter symlinks into /python, so it must keep the same path.
+COPY --from=build /python /python
 COPY --from=build /app/.venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
-USER pxar
+COPY --from=build --chown=10001:10001 /out/data /data
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+# uid 10001 (not distroless's 65532) so the host /data ownership in docs/runbook.md step 0 stays valid.
+USER 10001:10001
+WORKDIR /data
 EXPOSE 8787
 # Only meaningful for `serve` (healthy = /healthz 200: loop alive and recent; the probe follows LISTEN). One-shot `plan`/`apply`
 # containers never listen, so they would report unhealthy: harmless, or run them with --no-healthcheck.

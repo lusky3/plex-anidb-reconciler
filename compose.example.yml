@@ -1,8 +1,18 @@
 services:
   plex-anidb-reconciler:
-    build: .
+    # Published by CI (main and v* tags) with SBOM + provenance attestations. For production, pin the digest
+    # (`ghcr.io/lusky3/plex-anidb-reconciler@sha256:...`) or a version tag. `build: .` works for local builds.
+    image: ghcr.io/lusky3/plex-anidb-reconciler:latest
     container_name: plex-anidb-reconciler
     restart: unless-stopped
+    # Hardening: distroless image (no shell), non-root uid 10001, read-only root filesystem, no Linux
+    # capabilities, no privilege escalation. All state lives in the /data volume.
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
     # On SIGTERM the service waits up to SHUTDOWN_GRACE_S (default 25 s) for an in-flight run;
     # keep Docker's stop timeout above that.
     stop_grace_period: 30s

@@ -19,7 +19,9 @@ otherwise it is listed as `skipped` (`detail` column: `prerequisite_not_applied`
 
 ## Docker
 
-Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See `compose.example.yml` for a Saltbox deployment and [docs/runbook.md](docs/runbook.md) for the rollout checklist.
+Images are published to `ghcr.io/lusky3/plex-anidb-reconciler` (`latest` and `sha-<commit>` from `main`, `X.Y.Z`/`X.Y` from `vX.Y.Z` tags) with SBOM and provenance attestations; inspect them with `docker buildx imagetools inspect ghcr.io/lusky3/plex-anidb-reconciler:latest --format '{{ json .SBOM }}'`. Local build: `docker build -t pxar .`. The image runs `pxar serve` by default.
+
+The image is hardened: a distroless runtime (`gcr.io/distroless/cc-debian13`, glibc and CA certificates only: no shell, no package manager, no pip) with a uv-managed standalone CPython 3.14, running as uid 10001. Base images are pinned by digest and kept current by Dependabot. The compose example adds a read-only root filesystem, drops all capabilities, sets `no-new-privileges` and a PID limit. See `compose.example.yml` for a Saltbox deployment and [docs/runbook.md](docs/runbook.md) for the rollout checklist.
 
 ## Configuration
 
@@ -51,7 +53,8 @@ Blank optional variables fall back to their defaults, with two exceptions: a bla
 GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to `main`:
 
 - **test**: `ruff check`, `ruff format --check`, `pytest` with coverage; `coverage.xml` is uploaded to Codecov (needs the `CODECOV_TOKEN` repository secret; upload failures don't fail CI). Pytest treats `ResourceWarning` as an error, so leaked files, sockets or DB connections fail the suite.
-- **image**: builds the image with Docker Buildx, smoke-tests it (`--help`, and a config error must exit 1 without echoing env values), then rebuilds from cache with SBOM (SPDX) and max-mode provenance attestations and uploads `sbom.spdx.json` and `provenance.json` as the `sbom-<sha>` workflow artifact. Nothing is pushed to a registry.
+- **image** (after `test` passes): builds with Docker Buildx and smoke-tests the image under hardened runtime flags (read-only root, no capabilities, no-new-privileges; it must have no shell and run as uid 10001; a config error must exit 1 without echoing env values). A Trivy scan fails the job on any fixable HIGH/CRITICAL vulnerability. On pull requests the SBOM (SPDX) and max-mode provenance are exported as the `sbom-<sha>` artifact and nothing is pushed. On `main` and `v*` tags the image is pushed to GHCR with those attestations attached and OCI labels/annotations from `docker/metadata-action`.
+- All actions are pinned to commit SHAs; Dependabot (`.github/dependabot.yml`) updates actions, base-image digests and `uv.lock` weekly.
 
 ## Accepted risks
 
