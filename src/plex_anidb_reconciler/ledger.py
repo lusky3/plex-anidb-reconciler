@@ -31,14 +31,13 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 CREATE INDEX IF NOT EXISTS ix_actions_kind_status_rk ON actions (kind, status, rating_key);
 CREATE INDEX IF NOT EXISTS ix_actions_kind_status_file ON actions (kind, status, file_id);
-DELETE FROM actions WHERE status NOT IN ('applied', 'failed');
 """
 
 
 # Static queries only (no SQL built from strings): the key column depends on the action kind.
 _SEEN_SUCCESS = {
-    ActionKind.MARK_PLEX_PLAYED: "SELECT 1 FROM actions WHERE kind = ? AND rating_key = ? AND status = 'applied' LIMIT 1",
-    ActionKind.SET_FILE_WATCHED: "SELECT 1 FROM actions WHERE kind = ? AND file_id = ? AND status = 'applied' LIMIT 1",
+    ActionKind.MARK_PLEX_PLAYED: "SELECT 1 FROM actions WHERE kind = ? AND rating_key = ? AND status = ? LIMIT 1",
+    ActionKind.SET_FILE_WATCHED: "SELECT 1 FROM actions WHERE kind = ? AND file_id = ? AND status = ? LIMIT 1",
 }
 
 
@@ -64,6 +63,8 @@ class Ledger:
         self._db = sqlite3.connect(path)
         self._db.executescript(_SCHEMA)
         self._add_missing_columns()
+        # rows from versions that also stored planned/skipped actions: the ledger only audits writes
+        self._db.execute("DELETE FROM actions WHERE status NOT IN (?, ?)", STATUSES)
         self._db.commit()
 
     def _add_missing_columns(self) -> None:
@@ -82,22 +83,22 @@ class Ledger:
         query = _SEEN_SUCCESS.get(kind)
         if query is None:
             return False
-        return self._db.execute(query, (kind.value, key)).fetchone() is not None
+        return self._db.execute(query, (kind.value, key, Status.APPLIED)).fetchone() is not None
 
     def applied_r1_keys(self) -> frozenset[str]:
         """Rating keys the reconciler itself marked played in Plex (R1)."""
         rows = self._db.execute(
-            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status = 'applied' AND rating_key IS NOT NULL",
-            (ActionKind.MARK_PLEX_PLAYED.value,),
+            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status = ? AND rating_key IS NOT NULL",
+            (ActionKind.MARK_PLEX_PLAYED.value, Status.APPLIED),
         )
         return frozenset(r[0] for r in rows)
 
     def applied_sets(self) -> list[PendingWatch]:
         """Applied file watches, in write order (the snapshot may not show them yet)."""
         rows = self._db.execute(
-            "SELECT file_id, fid, eids, when_ts FROM actions WHERE kind = ? AND status = 'applied'"
+            "SELECT file_id, fid, eids, when_ts FROM actions WHERE kind = ? AND status = ?"
             " AND file_id IS NOT NULL AND when_ts IS NOT NULL ORDER BY id",
-            (ActionKind.SET_FILE_WATCHED.value,),
+            (ActionKind.SET_FILE_WATCHED.value, Status.APPLIED),
         )
         return [
             PendingWatch(
