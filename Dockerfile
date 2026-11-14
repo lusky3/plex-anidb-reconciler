@@ -5,6 +5,7 @@
 FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b AS uv
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS build
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/python \
     UV_PYTHON_PREFERENCE=only-managed \
@@ -16,14 +17,14 @@ COPY .python-version pyproject.toml uv.lock README.md ./
 RUN uv python install \
     && uv sync --locked --no-dev --no-install-project
 COPY src ./src
+# Install the project, then drop parts of the standalone CPython the service never uses (GUI, IDE,
+# headers, installers). pip goes too: the runtime needs no package installer, and its vendored
+# certifi/urllib3/msgpack lag behind the app's own (locked) dependencies.
 RUN uv sync --locked --no-dev --no-editable \
-    && mkdir -p /out/data
-# Drop parts of the standalone CPython the service never uses (GUI, IDE, headers, installers).
-# pip goes too: the runtime needs no package installer, and its vendored certifi/urllib3/msgpack
-# lag behind the app's own (locked) dependencies.
-RUN set -eu; py="$(readlink -f /app/.venv/bin/python | sed 's#/bin/python[0-9.]*$##')/"; \
-    test -d "${py}lib"; \
-    rm -rf /python/.lock /python/.temp /python/.gitignore \
+    && mkdir -p /out/data \
+    && py="$(readlink -f /app/.venv/bin/python | sed 's#/bin/python[0-9.]*$##')/" \
+    && test -d "${py}lib" \
+    && rm -rf /python/.lock /python/.temp /python/.gitignore \
         "$py"include "$py"share "$py"lib/tcl* "$py"lib/tk* "$py"lib/itcl* "$py"lib/thread* \
         "$py"lib/python3.*/idlelib "$py"lib/python3.*/tkinter "$py"lib/python3.*/turtledemo \
         "$py"lib/python3.*/turtle.py "$py"lib/python3.*/ensurepip "$py"lib/python3.*/pydoc_data \
