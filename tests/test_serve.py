@@ -359,9 +359,8 @@ def test_trigger_large_body_fully_drained_before_response(http_svc):
     body = b"x" * (200 * 1024)  # > the old 64 KiB partial read, < 1 MiB
     conn, (code, _, _) = raw_post(base, "/trigger", {"Content-Length": str(len(body))}, body)
     assert code == 202
-    conn.request(
-        "GET", "/healthz"
-    )  # server is still sane after the large body (HTTP/1.0 handler: no keep-alive claimed)
+    # the server is still sane after the large body (HTTP/1.0 handler: no keep-alive is claimed)
+    conn.request("GET", "/healthz")
     resp = conn.getresponse()
     assert resp.status in (200, 503) and "loop" in json.loads(resp.read())
     conn.close()
@@ -462,6 +461,10 @@ def test_dead_loop_thread_is_503_even_during_lock_hold():
         ("[fd00::5]:8080", "http://[fd00::5]:8080/healthz"),
         ("10.1.2.3:81", "http://10.1.2.3:81/healthz"),
         ("  127.0.0.1:7000 ", "http://127.0.0.1:7000/healthz"),
+        ("[0:0:0:0:0:0:0:0]:8080", "http://[::1]:8080/healthz"),
+        ("[::ffff:0.0.0.0]:8080", "http://[::1]:8080/healthz"),
+        ("[fe80::1%eth0]:8080", "http://[fe80::1%25eth0]:8080/healthz"),
+        ("myhost:8080", "http://myhost:8080/healthz"),
     ],
 )
 def test_health_url_derived_from_listen(listen, url):
@@ -523,6 +526,50 @@ def test_hung_run_goes_stale_after_run_stale_minutes():
         gate.set()
         assert wait_for(lambda: svc.health()["last_run_id"] == "r1")
         assert svc.health().get("run_active_since") is None and svc.healthy() is True
+    finally:
+        gate.set()
+        stop_loop(svc, stop, t)
+
+
+def test_healthcheck_ignores_proxy_env(monkeypatch):
+    from plex_anidb_reconciler.serve import healthcheck
+
+    for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:1")  # unreachable proxy
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.setattr(urllib.request, "_opener", None)  # urlopen caches its opener (and proxy env) globally
+    svc = make_service(lambda s, **kw: FakeResult("a", {}))
+    server, base = start_http(svc)
+    try:
+        stop, t = start_loop(svc)
+        try:
+            assert healthcheck({"LISTEN": base.removeprefix("http://")}) == 0
+        finally:
+            stop_loop(svc, stop, t)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_health_loop_and_run_active_since_are_one_snapshot():
+    clock = FakeClock()
+    gate = threading.Event()
+    started = threading.Event()
+
+    def run_fn(settings, **kw):
+        started.set()
+        gate.wait(30)
+        return FakeResult("r1", {})
+
+    svc = make_service(run_fn, clock=clock)
+    stop, t = start_loop(svc)
+    try:
+        svc.request_run()
+        assert started.wait(2)
+        clock.advance(minutes=400)
+        h = svc.health()
+        assert h["loop"] == "stale" and h["run_active_since"]
     finally:
         gate.set()
         stop_loop(svc, stop, t)

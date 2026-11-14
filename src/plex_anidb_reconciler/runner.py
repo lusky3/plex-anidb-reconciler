@@ -153,7 +153,8 @@ def run_once(
 ) -> RunResult:
     """rules/file_id restrict which executable actions (R1/R2/R2b) run; reports are always listed.
     Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions are recorded
-    as skipped/shutdown (an in-flight write completes and is recorded first). Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
+    as skipped/shutdown (an in-flight write completes and is recorded first).
+    Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
     run_id = _new_run_id(now)
     report_path = Path(settings.data_dir) / "reports" / f"{run_id}.csv"
 

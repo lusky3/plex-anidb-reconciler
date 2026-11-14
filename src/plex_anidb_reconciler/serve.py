@@ -5,6 +5,7 @@ should be the only process that applies; a concurrent CLI `pxar apply` in anothe
 process is not coordinated with this lock.
 """
 
+import ipaddress
 import json
 import logging
 import signal
@@ -51,9 +52,11 @@ class Service:
         """The loop thread is alive and either a run has been active for at most RUN_STALE_MINUTES (a long
         run is not unhealthy, a hung one is) or, when idle, it has beaten within 2 x POLL_MINUTES + 5 min."""
         with self._state_lock:
-            beat = self._heartbeat
-            thread = self._loop_thread
-            started = self._run_started
+            return self._healthy_locked()
+
+    def _healthy_locked(self) -> bool:
+        """healthy() for a caller already holding _state_lock."""
+        beat, thread, started = self._heartbeat, self._loop_thread, self._run_started
         if thread is None or not thread.is_alive() or beat is None:
             return False
         if started is not None:  # a reconcile is running; the loop beats again when it finishes
@@ -65,12 +68,10 @@ class Service:
         self._event.set()
 
     def health(self) -> dict:
-        loop = "ok" if self.healthy() else "stale"
-        with self._state_lock:
-            started = self._run_started
-            out = {**self._state, "loop": loop}
-        if started is not None:
-            out["run_active_since"] = started.astimezone(UTC).isoformat()
+        with self._state_lock:  # one acquisition: loop, run_active_since and the last-run fields agree
+            out = {**self._state, "loop": "ok" if self._healthy_locked() else "stale"}
+            if self._run_started is not None:
+                out["run_active_since"] = self._run_started.astimezone(UTC).isoformat()
         return out
 
     def run_pending_now(self) -> None:
@@ -179,19 +180,28 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
 def health_url(listen: str | None) -> str:
     """Where the container probe should connect, derived from LISTEN (default 0.0.0.0:8787)."""
     host, port = parse_listen(listen if listen and listen.strip() else DEFAULT_LISTEN)
-    if host in ("0.0.0.0", ""):
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:  # a hostname: connect to it as given
+        pass
+    else:
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if ip.is_unspecified or (mapped is not None and mapped.is_unspecified):  # any form of 0.0.0.0 / ::
+            host = "::1" if ip.version == 6 else "127.0.0.1"
+        else:
+            host = str(ip)
+        if ip.version == 6:
+            host = f"[{host.replace('%', '%25')}]"  # a zone id must be percent-encoded in a URL
+    if host == "":
         host = "127.0.0.1"
-    elif host == "::":
-        host = "::1"
-    if ":" in host:
-        host = f"[{host}]"
     return f"http://{host}:{port}/healthz"
 
 
 def healthcheck(env: Mapping[str, str]) -> int:
     """Docker HEALTHCHECK: 0 iff /healthz answers 200. Needs no backend settings; never raises."""
     try:
-        with urllib.request.urlopen(health_url(env.get("LISTEN")), timeout=5) as resp:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # a loopback probe never uses a proxy
+        with opener.open(health_url(env.get("LISTEN")), timeout=5) as resp:
             return 0 if resp.status == 200 else 1
     except Exception:  # noqa: BLE001 - any failure (bad LISTEN, refused, 503, timeout) means unhealthy
         return 1
