@@ -105,3 +105,22 @@ def test_created_parsing(created, expected):
 def test_created_missing_key_is_none():
     respx.get(f"{BASE}/api/v3/File").mock(return_value=httpx.Response(200, json={"List": [{"ID": 9}]}))
     assert make_client().list_files()[0].created_at is None
+
+
+@respx.mock
+def test_get_file_parses_single_file_and_sends_includes():
+    raw = json.loads(FIXTURE.read_text())["List"][0]
+    route = respx.get(f"{BASE}/api/v3/File/1").mock(return_value=httpx.Response(200, json=raw))
+    f = make_client().get_file(1)
+    assert (f.file_id, f.fid, f.eids, f.manual_link) == (1, 12345, (50,), False)
+    req = route.calls.last.request
+    assert req.headers["apikey"] == "SECRETKEY"
+    assert req.url.params["includeDataFrom"] == "AniDB"
+    assert req.url.params["include"] == "XRefs,AbsolutePaths"
+
+
+@respx.mock
+def test_get_file_error_raises():
+    respx.get(f"{BASE}/api/v3/File/9").mock(return_value=httpx.Response(404))
+    with pytest.raises(ShokoError):
+        make_client().get_file(9)

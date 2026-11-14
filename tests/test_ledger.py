@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from plex_anidb_reconciler.ledger import Ledger
-from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch
 
 R1 = Action(ActionKind.MARK_PLEX_PLAYED, "R1", "rk1", None, None, (50,), None, "r")
 SET = Action(ActionKind.SET_FILE_WATCHED, "R2", "rk2", 7, 12345, (50,), datetime(2026, 1, 1, tzinfo=UTC), "r")
@@ -11,8 +11,7 @@ SET = Action(ActionKind.SET_FILE_WATCHED, "R2", "rk2", 7, 12345, (50,), datetime
 
 def test_only_applied_counts_as_seen(tmp_path):
     led = Ledger(tmp_path / "l.sqlite")
-    for status in ("failed", "dry_run", "capped", "skipped_ledger"):
-        led.record("run", R1, status)
+    led.record("run", R1, "failed")
     assert not led.seen_success(ActionKind.MARK_PLEX_PLAYED, "rk1")
     led.record("run", R1, "applied")
     led.record("run", SET, "applied")
@@ -29,3 +28,34 @@ def test_persists_across_instances_and_rejects_bad_status(tmp_path):
     assert led.seen_success(ActionKind.SET_FILE_WATCHED, 7)
     with pytest.raises(ValueError):
         led.record("run", SET, "bogus")
+
+
+def test_ledger_stores_only_applied_and_failed(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    for status in ("dry_run", "capped", "skipped_ledger", "reported"):
+        with pytest.raises(ValueError):
+            led.record("run", R1, status)
+    led.record("run", R1, "failed", "x")
+    led.record("run", SET, "applied")
+    assert led._db.execute("SELECT status FROM actions ORDER BY id").fetchall() == [("failed",), ("applied",)]
+    idx = {r[0] for r in led._db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"ix_actions_kind_status_rk", "ix_actions_kind_status_file"} <= idx
+
+
+def test_old_non_audit_rows_are_dropped_on_open(tmp_path):
+    p = tmp_path / "l.sqlite"
+    led = Ledger(p)
+    led._db.execute("INSERT INTO actions (status, kind) VALUES ('reported', 'report'), ('dry_run', 'report')")
+    led._db.commit()
+    led.close()
+    assert Ledger(p)._db.execute("SELECT COUNT(*) FROM actions").fetchone() == (0,)
+
+
+def test_applied_r1_keys_and_pending_sets(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.record("run", R1, "applied")
+    led.record("run", Action(ActionKind.MARK_PLEX_PLAYED, "R1", "rk9", None, None, (), None, "r"), "failed")
+    led.record("run", SET, "applied")
+    led.record("run", Action(ActionKind.SET_FILE_WATCHED, "R2", "rk3", 8, 99, (60, 61), SET.when, "r"), "failed")
+    assert led.applied_r1_keys() == frozenset({"rk1"})
+    assert led.applied_sets() == [PendingWatch(7, 12345, (50,), SET.when)]

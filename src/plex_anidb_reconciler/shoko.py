@@ -72,6 +72,21 @@ class ShokoClient:
         items = data["List"] if isinstance(data, dict) else data
         return [_parse_file(item, self.tz) for item in items]
 
+    def get_file(self, file_id: int) -> ShokoFile:
+        """Current state of one file (read-only), used to re-check right before a write.
+        The include* booleans are sent too in case this endpoint ignores ``include``."""
+        params = {
+            "include": "XRefs,AbsolutePaths",
+            "includeXRefs": "true",
+            "includeAbsolutePaths": "true",
+            "includeDataFrom": "AniDB",
+        }
+        try:
+            raw = self._request("GET", f"/api/v3/File/{file_id}", params=params).json()
+            return _parse_file(raw, self.tz)
+        except ValueError, KeyError, TypeError, AttributeError:
+            raise ShokoError(f"GET /api/v3/File/{file_id} returned an unexpected body") from None
+
     def set_watched(self, file_id: int, when: datetime) -> None:
         stamp = to_shoko_time(when, self.tz)
         body = {"WatchedCount": 1, "LastWatchedAt": stamp, "ResumePosition": None, "LastUpdatedAt": stamp}

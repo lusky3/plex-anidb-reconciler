@@ -31,6 +31,19 @@ def write_report(rows: list[tuple[Action, str]], path: Path) -> None:
             )
 
 
+def prune_reports(directory: Path, keep: int = 200) -> None:
+    """Keep the newest ``keep`` run reports. Run ids start with a UTC timestamp, so names sort by age."""
+    try:
+        reports = sorted(p for p in directory.glob("*.csv") if p.is_file())
+    except OSError:
+        return
+    for old in reports[: max(len(reports) - keep, 0)]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def summarize(rows: list[tuple[Action, str]]) -> str:
     counts = Counter((a.rule, status) for a, status in rows)
     if not counts:

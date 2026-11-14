@@ -1,12 +1,15 @@
-"""SQLite ledger: idempotency record of every planned/applied action."""
+"""SQLite ledger: audit and idempotency record of writes the reconciler attempted.
+
+Only ``applied`` and ``failed`` rows are stored; planned/skipped/capped/reported actions go to
+the per-run CSV report only, so the ledger grows with real writes, not with every poll."""
 
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch
 
-STATUSES = ("applied", "failed", "skipped_ledger", "dry_run", "reported", "capped")
+STATUSES = ("applied", "failed")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -22,7 +25,10 @@ CREATE TABLE IF NOT EXISTS actions (
     status TEXT,
     detail TEXT,
     created_at TEXT
-)
+);
+CREATE INDEX IF NOT EXISTS ix_actions_kind_status_rk ON actions (kind, status, rating_key);
+CREATE INDEX IF NOT EXISTS ix_actions_kind_status_file ON actions (kind, status, file_id);
+DELETE FROM actions WHERE status NOT IN ('applied', 'failed');
 """
 
 
@@ -34,7 +40,7 @@ class Ledger:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
-        self._db.execute(_SCHEMA)
+        self._db.executescript(_SCHEMA)
         self._db.commit()
 
     def close(self) -> None:
@@ -54,6 +60,31 @@ class Ledger:
             (kind.value, key),
         ).fetchone()
         return row is not None
+
+    def applied_r1_keys(self) -> frozenset[str]:
+        """Rating keys the reconciler itself marked played in Plex (R1)."""
+        rows = self._db.execute(
+            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status = 'applied' AND rating_key IS NOT NULL",
+            (ActionKind.MARK_PLEX_PLAYED.value,),
+        )
+        return frozenset(r[0] for r in rows)
+
+    def applied_sets(self) -> list[PendingWatch]:
+        """Applied file watches, in write order (the snapshot may not show them yet)."""
+        rows = self._db.execute(
+            "SELECT file_id, fid, eids, when_ts FROM actions WHERE kind = ? AND status = 'applied'"
+            " AND file_id IS NOT NULL AND when_ts IS NOT NULL ORDER BY id",
+            (ActionKind.SET_FILE_WATCHED.value,),
+        )
+        return [
+            PendingWatch(
+                file_id=file_id,
+                fid=fid,
+                eids=tuple(int(e) for e in (eids or "").split(",") if e),
+                when=datetime.fromisoformat(when_ts),
+            )
+            for file_id, fid, eids, when_ts in rows
+        ]
 
     def record(self, run_id: str, action: Action, status: str, detail: str = "") -> None:
         if status not in STATUSES:
