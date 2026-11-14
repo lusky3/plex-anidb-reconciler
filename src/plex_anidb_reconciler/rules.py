@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 
 from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, PlexItem, ShokoFile
@@ -105,18 +106,80 @@ def _eid_mismatch(f: ShokoFile, mylist: _Watched) -> bool:
     return bool(anidb_eids) and anidb_eids != set(f.eids)
 
 
-def _plan_item(
-    item: PlexItem,
-    resolved: list[Match] | tuple[Action, ...],
-    history: dict[str, list[datetime]],
-    r1_state: _Watched,
-    mylist: _Watched,
-    r2b_policy: str,
-    snapshot_fresh: bool,
-    r1_marked: frozenset[str],
-) -> list[Action]:
-    """r1_state drives R1 (snapshot + applied writes only); mylist drives R2/R2b and also includes
-    SETs planned earlier in this same plan() call."""
+@dataclass(frozen=True)
+class _Ctx:
+    """Per-pass inputs of _plan_item. r1_state drives R1 (snapshot + applied writes only); mylist drives
+    R2/R2b and also includes SETs planned earlier in this same plan() call."""
+
+    history: dict[str, list[datetime]]
+    r1_state: _Watched
+    mylist: _Watched
+    r2b_policy: str
+    snapshot_fresh: bool
+    r1_marked: frozenset[str]
+
+
+def _plan_r1(rk: str, eids: tuple[int, ...], r1_state: _Watched) -> list[Action]:
+    r1_watched = r1_state.watched_eids()
+    if all(e in r1_watched for e in eids):
+        return [Action(ActionKind.MARK_PLEX_PLAYED, "R1", rk, None, None, eids, None, "anidb_episode_watched")]
+    if any(e in r1_watched for e in eids):
+        return [_report("R4", "partial_episode", rk)]
+    return []
+
+
+def _plan_r2(item: PlexItem, f: ShokoFile, path: str | None, plays_all: list[datetime], ctx: _Ctx) -> Action:
+    rk = item.rating_key
+    if plays_all:
+        when = min(plays_all)
+    elif rk in ctx.r1_marked:
+        # lastViewedAt may be our own R1 scrobble, not a real event for this file (ruling 15)
+        return _report("R4", "plex_marked_by_reconciler", rk, f)
+    else:
+        when = item.last_viewed_at
+    if when is None:
+        return _report("R4", "no_date", rk, f)
+    if not ctx.snapshot_fresh:
+        return _report("R4", "stale_snapshot", rk, f, when)
+    return _set("R2", "new_watch", rk, f, when, path)
+
+
+def _plan_r2b(rk: str, f: ShokoFile, path: str | None, plays_all: list[datetime], ctx: _Ctx) -> Action:
+    if f.created_at is None:
+        return _report("R2b", "unknown_file_age", rk, f)
+    if ctx.r2b_policy != "record":
+        return _report("R2b", "ignore_policy", rk, f)
+    cutoff = ctx.mylist.max_watch(f.eids)
+    plays = [t for t in plays_all if cutoff is not None and t > cutoff and t > f.created_at]
+    if not plays:
+        return _report("R2b", "no_playback", rk, f)
+    if not ctx.snapshot_fresh:
+        return _report("R2b", "stale_snapshot", rk, f, min(plays))
+    prereqs = ctx.mylist.planned_prerequisites(f.eids)
+    if len(prereqs) > 1:
+        # would need several R2s of this run to land first: decide next run, once they are written
+        return _report("R2b", "multiple_prerequisites", rk, f, min(plays))
+    dep = next(iter(prereqs)) if prereqs else None
+    return _set("R2b", "rewatch_new_release", rk, f, min(plays), path, dep)
+
+
+def _plan_file(item: PlexItem, f: ShokoFile, path: str | None, ctx: _Ctx) -> Action | None:
+    rk = item.rating_key
+    if ctx.mylist.fid_watched(f.fid):
+        return None
+    if not ctx.mylist.has_fid(f.fid):
+        return _report("R4", "not_in_snapshot", rk, f)
+    watched = ctx.mylist.watched_eids()
+    watched_f = [e for e in f.eids if e in watched]
+    plays_all = ctx.history.get(rk) or []
+    if not watched_f:
+        return _plan_r2(item, f, path, plays_all, ctx)
+    if len(watched_f) < len(f.eids):
+        return _report("R4", "partial_episode", rk, f)
+    return _plan_r2b(rk, f, path, plays_all, ctx)
+
+
+def _plan_item(item: PlexItem, resolved: list[Match] | tuple[Action, ...], ctx: _Ctx) -> list[Action]:
     if isinstance(resolved, tuple):
         return list(resolved)
     rk = item.rating_key
@@ -124,78 +187,31 @@ def _plan_item(
     matched: dict[int, str | None] = {}
     for m in resolved:
         matched.setdefault(m.file.file_id, m.path)
-    eids = tuple(sorted({e for f in files for e in f.eids}))
 
     # AniDB and Shoko link a file to different episodes: never write, not even R1 (spec R4)
-    mismatched = {f.file_id: f for f in files if _eid_mismatch(f, mylist)}
+    mismatched = {f.file_id: f for f in files if _eid_mismatch(f, ctx.mylist)}
     if mismatched:
         return [_report("R4", "eid_mismatch", rk, f) for f in mismatched.values()]
-
     if item.view_count == 0:
-        r1_watched = r1_state.watched_eids()
-        if all(e in r1_watched for e in eids):
-            return [Action(ActionKind.MARK_PLEX_PLAYED, "R1", rk, None, None, eids, None, "anidb_episode_watched")]
-        if any(e in r1_watched for e in eids):
-            return [_report("R4", "partial_episode", rk)]
-        return []
-
-    watched = mylist.watched_eids()
-
+        return _plan_r1(rk, tuple(sorted({e for f in files for e in f.eids})), ctx.r1_state)
     distinct = {f.file_id: f for f in files}
     if len(distinct) > 1:
         return [_report("R4", "multi_version", rk, f) for f in distinct.values()]
-
-    out: list[Action] = []
-    plays_all = history.get(rk) or []
-    for f in files:
-        if mylist.fid_watched(f.fid):
-            continue
-        if not mylist.has_fid(f.fid):
-            out.append(_report("R4", "not_in_snapshot", rk, f))
-            continue
-        watched_f = [e for e in f.eids if e in watched]
-        if watched_f and len(watched_f) < len(f.eids):
-            out.append(_report("R4", "partial_episode", rk, f))
-            continue
-        if not watched_f:
-            if plays_all:
-                when = min(plays_all)
-            elif rk in r1_marked:
-                # lastViewedAt may be our own R1 scrobble, not a real event for this file (ruling 15)
-                out.append(_report("R4", "plex_marked_by_reconciler", rk, f))
-                continue
-            else:
-                when = item.last_viewed_at
-            if when is None:
-                out.append(_report("R4", "no_date", rk, f))
-            elif not snapshot_fresh:
-                out.append(_report("R4", "stale_snapshot", rk, f, when))
-            else:
-                out.append(_set("R2", "new_watch", rk, f, when, matched[f.file_id]))
-        else:
-            cutoff = mylist.max_watch(f.eids)
-            if f.created_at is None:
-                out.append(_report("R2b", "unknown_file_age", rk, f))
-                continue
-            plays = [t for t in plays_all if cutoff is not None and t > cutoff and t > f.created_at]
-            prereqs = mylist.planned_prerequisites(f.eids)
-            if r2b_policy == "record" and plays and snapshot_fresh and len(prereqs) > 1:
-                # would need several R2s of this run to land first: decide next run, once they are written
-                out.append(_report("R2b", "multiple_prerequisites", rk, f, min(plays)))
-            elif r2b_policy == "record" and plays and snapshot_fresh:
-                dep = next(iter(prereqs)) if prereqs else None
-                out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays), matched[f.file_id], dep))
-            elif r2b_policy != "record":
-                out.append(_report("R2b", "ignore_policy", rk, f))
-            elif not plays:
-                out.append(_report("R2b", "no_playback", rk, f))
-            else:
-                out.append(_report("R2b", "stale_snapshot", rk, f, min(plays)))
-    return out
+    planned = (_plan_file(item, f, matched[f.file_id], ctx) for f in files)
+    return [a for a in planned if a is not None]
 
 
 def _sort_key(a: Action) -> tuple:
     return (a.rating_key or "", a.file_id is not None, a.file_id or 0, a.rule, a.reason)
+
+
+def _keep_earliest_set(best_set: dict[int, Action], a: Action) -> None:
+    if a.file_id is None or a.when is None:
+        raise ValueError("SET action without file_id or date")
+    cur = best_set.get(a.file_id)
+    # earliest date wins; equal dates go to the smallest rating key (independent of input order)
+    if cur is None or cur.when is None or (a.when, a.rating_key or "") < (cur.when, cur.rating_key or ""):
+        best_set[a.file_id] = a
 
 
 def _merge(actions: list[Action]) -> tuple[list[Action], dict[int, Action]]:
@@ -205,17 +221,11 @@ def _merge(actions: list[Action]) -> tuple[list[Action], dict[int, Action]]:
     seen_r1: set[str | None] = set()
     for a in actions:
         if a.kind is ActionKind.SET_FILE_WATCHED:
-            if a.file_id is None or a.when is None:
-                raise ValueError("SET action without file_id or date")
-            cur = best_set.get(a.file_id)
-            # earliest date wins; equal dates go to the smallest rating key (independent of input order)
-            if cur is None or cur.when is None or (a.when, a.rating_key or "") < (cur.when, cur.rating_key or ""):
-                best_set[a.file_id] = a
-        elif a.kind is ActionKind.MARK_PLEX_PLAYED:
-            if a.rating_key not in seen_r1:
-                seen_r1.add(a.rating_key)
-                kept.append(a)
-        else:
+            _keep_earliest_set(best_set, a)
+        elif a.kind is not ActionKind.MARK_PLEX_PLAYED:
+            kept.append(a)
+        elif a.rating_key not in seen_r1:
+            seen_r1.add(a.rating_key)
             kept.append(a)
     return kept, best_set
 
@@ -272,10 +282,10 @@ def plan(
     committed: list[Action] = []
     while True:
         planned = [PendingWatch(a.file_id or 0, a.fid, a.eids, a.when) for a in committed if a.when is not None]
-        state = _Watched(mylist, pending, planned)
+        ctx = _Ctx(history, r1_state, _Watched(mylist, pending, planned), r2b_policy, snapshot_fresh, r1_marked)
         actions: list[Action] = []
         for item, res in resolved:
-            actions.extend(_plan_item(item, res, history, r1_state, state, r2b_policy, snapshot_fresh, r1_marked))
+            actions.extend(_plan_item(item, res, ctx))
         kept, best_set = _merge(actions)
         # Two different files of one episode must not both get R2 in one run: keep the earliest as R2,
         # treat it as written and re-plan, so the others go through the gated R2b path (ruling 16).

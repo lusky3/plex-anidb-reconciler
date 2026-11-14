@@ -41,6 +41,21 @@ def _parse_episode(m: dict, section: int) -> PlexItem:
     )
 
 
+def _parse_page(path: str, resp: httpx.Response) -> tuple[list, int | None]:
+    """The ``Metadata`` entries and ``totalSize`` of one page."""
+    try:
+        container = resp.json()["MediaContainer"]
+        if not isinstance(container, dict):
+            raise TypeError("MediaContainer is not an object")
+        items = container.get("Metadata") or []
+        if not isinstance(items, list):
+            raise TypeError("Metadata is not a list")
+        total = container.get("totalSize")
+        return items, None if total is None else int(total)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise _bad_body(path, exc) from None
+
+
 def _episode_sig(m: dict) -> object:
     return m.get("ratingKey")
 
@@ -76,18 +91,7 @@ class PlexClient:
         previous: tuple | None = None
         for _ in range(MAX_PAGES):
             headers = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(PAGE_SIZE)}
-            resp = self._request(path, params, headers)
-            try:
-                container = resp.json()["MediaContainer"]
-                if not isinstance(container, dict):
-                    raise TypeError("MediaContainer is not an object")
-                items = container.get("Metadata") or []
-                if not isinstance(items, list):
-                    raise TypeError("Metadata is not a list")
-                total = container.get("totalSize")
-                total = None if total is None else int(total)
-            except (ValueError, KeyError, TypeError) as exc:
-                raise _bad_body(path, exc) from None
+            items, total = _parse_page(path, self._request(path, params, headers))
             if not items:
                 return out
             page = tuple(signature(m) if isinstance(m, dict) else None for m in items)
