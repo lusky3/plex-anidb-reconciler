@@ -132,7 +132,7 @@ def s_ambiguous():
 def s_multi_partial_watched():
     return simple(
         files=[shoko(1, 12345, [50, 51], "/p/x.mkv")],
-        entries=[entry(999, 50, T1)],
+        entries=[entry(12345, 51, None), entry(999, 50, T1)],  # AniDB links the fid to both eids too
         history={"a": [T3]},
     )
 
@@ -141,7 +141,7 @@ def s_multi_partial_unwatched():
     return simple(
         items=[item("a", "/p/x.mkv", views=0)],
         files=[shoko(1, 12345, [50, 51], "/p/x.mkv")],
-        entries=[entry(999, 50, T1)],
+        entries=[entry(12345, 51, None), entry(999, 50, T1)],  # AniDB links the fid to both eids too
     )
 
 
@@ -667,3 +667,17 @@ def test_matched_path_is_the_rewritten_shoko_path():
     acts = plan(sc.items, {}, PathMatcher(sc.files, [("/plex", "/shoko")]), sc.mylist(), "record", True)
     (a,) = acts
     assert (a.rule, a.matched_path) == ("R2", "/shoko/x.mkv")
+
+
+# --- G3: the snapshot-vs-Shoko eid check runs before R1 ---
+
+
+def test_eid_mismatch_blocks_r1():
+    # Shoko links file 1 to eid 50 (watched via another file); AniDB links its fid to eid 51
+    sc = simple(
+        items=[item("a", "/p/x.mkv", views=0)],
+        no_snapshot_row=True,
+        entries=[entry(12345, 51, None), entry(999, 50, T1)],
+    )
+    acts = sc.run()
+    assert [(a.kind, a.rule, a.reason, a.file_id) for a in acts] == [(ActionKind.REPORT, "R4", "eid_mismatch", 1)]

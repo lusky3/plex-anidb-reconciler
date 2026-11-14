@@ -100,6 +100,11 @@ def _resolve(item: PlexItem, matcher: PathMatcher) -> list[Match] | tuple[Action
     return matches
 
 
+def _eid_mismatch(f: ShokoFile, mylist: _Watched) -> bool:
+    anidb_eids = mylist.eids_for_fid(f.fid)
+    return bool(anidb_eids) and anidb_eids != set(f.eids)
+
+
 def _plan_item(
     item: PlexItem,
     resolved: list[Match] | tuple[Action, ...],
@@ -120,6 +125,11 @@ def _plan_item(
     for m in resolved:
         matched.setdefault(m.file.file_id, m.path)
     eids = tuple(sorted({e for f in files for e in f.eids}))
+
+    # AniDB and Shoko link a file to different episodes: never write, not even R1 (spec R4)
+    mismatched = {f.file_id: f for f in files if _eid_mismatch(f, mylist)}
+    if mismatched:
+        return [_report("R4", "eid_mismatch", rk, f) for f in mismatched.values()]
 
     if item.view_count == 0:
         r1_watched = r1_state.watched_eids()
@@ -146,11 +156,6 @@ def _plan_item(
         watched_f = [e for e in f.eids if e in watched]
         if watched_f and len(watched_f) < len(f.eids):
             out.append(_report("R4", "partial_episode", rk, f))
-            continue
-        anidb_eids = mylist.eids_for_fid(f.fid)
-        if anidb_eids and anidb_eids != set(f.eids):
-            # AniDB and Shoko link this file to different episodes: never write (spec R4)
-            out.append(_report("R4", "eid_mismatch", rk, f))
             continue
         if not watched_f:
             if plays_all:
