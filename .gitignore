@@ -7,3 +7,7 @@ dist/
 *.egg-info/
 .env
 .superpowers/
+.coverage
+coverage.xml
+htmlcov/
+sbom/

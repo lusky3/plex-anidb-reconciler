@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,23 @@ import respx
 from plex_anidb_reconciler import cli
 from plex_anidb_reconciler.config import Settings
 from plex_anidb_reconciler.runner import build_clients, run_once
+
+
+def _csv_dicts(path):
+    with open(path, newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _csv_rows(path):
+    with open(path, newline="") as fh:
+        return list(csv.reader(fh))
+
+
+def _query(db, sql):
+    """Run a read-only query against the ledger and close the connection."""
+    with closing(sqlite3.connect(db)) as conn:
+        return conn.execute(sql).fetchall()
+
 
 SHOKO = "http://shoko:8111"
 PLEX = "http://plex:32400"
@@ -164,7 +182,7 @@ def test_failed_write_recorded_and_exit_code_2(env, monkeypatch, capsys):
     _, put = mock_servers(shoko_status=500)
     res = go(env, apply=True)
     assert res.counts == {"applied": 2, "failed": 1}
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert [r["status"] for r in rows if r["kind"] == "set_file_watched"] == ["failed"]
     # failed does not count as seen: it is retried
     put.mock(return_value=httpx.Response(200))
@@ -187,7 +205,7 @@ def test_snapshot_unavailable_no_actions(env, capsys):
     assert res.counts == {"snapshot_unavailable": 1}
     assert "snapshot_unavailable" in capsys.readouterr().out
     assert scrobble.call_count == 0 and put.call_count == 0
-    assert len(list(csv.reader(res.report_path.open()))) == 1  # header only
+    assert len(_csv_rows(res.report_path)) == 1  # header only
 
 
 @respx.mock
@@ -204,7 +222,7 @@ def test_stale_snapshot_defers_r2_but_not_r1(env):
 def test_report_csv_columns(env):
     mock_servers()
     res = go(env, apply=False)
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert list(rows[0]) == [
         "rule",
         "kind",
@@ -267,7 +285,7 @@ def test_c1_reconciler_scrobble_never_becomes_anidb_date(env):
         _, put, _ = mock_world(files, [plex_item("a", 1, 1, int(R1_TIME.timestamp()))])
         res = go(env, apply=True, now=R1_TIME + timedelta(days=30))
     assert put.call_count == 0
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert [(r["rule"], r["reason"], r["status"]) for r in rows] == [("R4", "plex_marked_by_reconciler", "reported")]
 
 
@@ -285,7 +303,7 @@ def test_i1_applied_set_gates_upgraded_file_until_snapshot_catches_up(env):
         _, put, _ = mock_world([shoko_file(2, 2, 50)], [plex_item("a", 2, 1, play)], [("a", play)])
         res = go(env, apply=True)
     assert put.call_count == 0
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert [(r["rule"], r["reason"], r["file_id"]) for r in rows] == [("R2b", "no_playback", "2")]
 
 
@@ -306,7 +324,7 @@ def test_m2_shoko_changed_since_index_blocks_write(env, current):
     res = go(env, apply=True)
     assert put.call_count == 0
     assert res.counts["failed"] == 1 and res.counts["shoko_changed"] == 1
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert [r["status"] for r in rows if r["kind"] == "set_file_watched"] == ["failed"]
 
 
@@ -372,9 +390,9 @@ def test_ledger_holds_only_writes_and_dry_run_is_uncapped(env):
     res = go(env, apply=False)
     assert res.counts == {"dry_run": 2, "reported": 1}
     db = Path(env["DATA_DIR"]) / "ledger.sqlite"
-    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM actions").fetchone() == (0,)
+    assert _query(db, "SELECT COUNT(*) FROM actions")[0] == (0,)
     go(env, apply=True)
-    assert sqlite3.connect(db).execute("SELECT status FROM actions").fetchall() == [("applied",)]
+    assert _query(db, "SELECT status FROM actions") == [("applied",)]
 
 
 @respx.mock
@@ -424,7 +442,7 @@ def dep_world(env_, *, detail_files=None):
 def set_rows(res):
     return [
         (r["rule"], r["file_id"], r["status"], r["detail"])
-        for r in csv.DictReader(res.report_path.open())
+        for r in _csv_dicts(res.report_path)
         if r["kind"] == "set_file_watched"
     ]
 
@@ -482,7 +500,7 @@ def test_rules_r2b_alone_skips_dependent(env):
     assert put.call_count == 0
     assert set_rows(res) == [("R2b", "1", "skipped", "prerequisite_not_applied")]
     db = Path(env["DATA_DIR"]) / "ledger.sqlite"
-    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM actions").fetchone() == (0,)
+    assert _query(db, "SELECT COUNT(*) FROM actions")[0] == (0,)
 
 
 @respx.mock
@@ -634,7 +652,7 @@ def test_stop_event_stops_at_write_boundary_and_records_rest_as_skipped(env):
     res = go(env, apply=True, stop=stop)
     assert res.counts == {"applied": 1, "skipped": 2}
     assert scrobble.call_count == 1 and put.call_count == 0  # in-flight write completed, nothing after it
-    rows = list(csv.DictReader(res.report_path.open()))
+    rows = list(_csv_dicts(res.report_path))
     assert [(r["status"], r["detail"]) for r in rows] == [
         ("applied", ""),
         ("skipped", "shutdown"),

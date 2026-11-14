@@ -105,7 +105,8 @@ def get(url):
         with urllib.request.urlopen(url, timeout=2) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        with e:
+            return e.code, json.loads(e.read())
 
 
 def test_healthz_reports_last_run():
@@ -130,6 +131,7 @@ def test_healthz_reports_last_run():
         )
         with pytest.raises(urllib.error.HTTPError) as ei:
             urllib.request.urlopen(base + "/nope", timeout=2)
+        ei.value.close()
         assert ei.value.code == 404
     finally:
         stop_loop(svc, stop, t)
@@ -260,8 +262,8 @@ def test_healthz_never_contains_secrets():
     stop, t = start_loop(svc)
     try:
         svc.run_pending_now()
-        req = urllib.request.urlopen(base + "/healthz", timeout=2)
-        raw = req.read().decode()
+        with urllib.request.urlopen(base + "/healthz", timeout=2) as req:
+            raw = req.read().decode()
         assert "PLEXSECRET" not in raw and "SHOKOSECRET" not in raw
         assert "error:RuntimeError" in raw
     finally:

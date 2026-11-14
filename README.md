@@ -46,6 +46,13 @@ Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See
 Blank optional variables fall back to their defaults, with two exceptions: a blank `SHOKO_TZ` or `PLEX_SECTIONS` is a config error, and the required variables (`SHOKO_URL`, `SHOKO_API_KEY`, `PLEX_URL`, `PLEX_TOKEN`) must be non-blank. Invalid values stop the program with a config error
 (exit 1) that names the variable, never its value. `PATH_MAP` sides are trimmed and must be non-empty.
 
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to `main`:
+
+- **test**: `ruff check`, `ruff format --check`, `pytest` with coverage; `coverage.xml` is uploaded to Codecov (needs the `CODECOV_TOKEN` repository secret; upload failures don't fail CI). Pytest treats `ResourceWarning` as an error, so leaked files, sockets or DB connections fail the suite.
+- **image**: builds the image with Docker Buildx, smoke-tests it (`--help`, and a config error must exit 1 without echoing env values), then rebuilds from cache with SBOM (SPDX) and max-mode provenance attestations and uploads `sbom.spdx.json` and `provenance.json` as the `sbom-<sha>` workflow artifact. Nothing is pushed to a registry.
+
 ## Accepted risks
 
 - **R2 credits the earliest Plex play to the current file (ruling 10).** Plex history has no file identity.

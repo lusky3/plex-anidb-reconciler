@@ -11,6 +11,7 @@ import logging
 import signal
 import socket
 import threading
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -203,6 +204,9 @@ def healthcheck(env: Mapping[str, str]) -> int:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # a loopback probe never uses a proxy
         with opener.open(health_url(env.get("LISTEN")), timeout=5) as resp:
             return 0 if resp.status == 200 else 1
+    except urllib.error.HTTPError as e:  # non-2xx (e.g. 503): close the response it carries
+        e.close()
+        return 1
     except Exception:  # noqa: BLE001 - any failure (bad LISTEN, refused, 503, timeout) means unhealthy
         return 1
 
