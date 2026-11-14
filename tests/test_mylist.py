@@ -105,3 +105,20 @@ def test_has_fid_counts_unwatched_entries():
     assert ml.has_fid(5) and ml.has_fid(6)
     assert not ml.fid_watched(5) and ml.fid_watched(6)
     assert not ml.has_fid(7) and not ml.has_fid(None) and not ml.has_fid(0)
+
+
+def test_eids_for_fid_collects_non_null_eids():
+    from plex_anidb_reconciler.models import MyListEntry
+
+    ml = MyListIndex(
+        [
+            MyListEntry(fid=5, eid=1, aid=1, viewed_at=None, state=1),
+            MyListEntry(fid=5, eid=2, aid=1, viewed_at=None, state=1),
+            MyListEntry(fid=5, eid=None, aid=1, viewed_at=None, state=1),
+            MyListEntry(fid=6, eid=None, aid=1, viewed_at=None, state=1),
+        ]
+    )
+    assert ml.eids_for_fid(5) == frozenset({1, 2})
+    assert ml.eids_for_fid(6) == frozenset()
+    assert ml.eids_for_fid(7) == frozenset()
+    assert ml.eids_for_fid(None) == frozenset()

@@ -489,3 +489,38 @@ def test_two_fids_same_episode_one_run_only_one_r2():
     acts = sc.run()
     assert [(a.rule, a.file_id) for a in sets(acts)] == [("R2", 2)]
     assert reports(acts) == [("R2b", "no_playback")]
+
+
+# --- R4 eid_mismatch: AniDB (snapshot) and Shoko disagree about a file's episodes ---
+
+
+def test_eid_mismatch_blocks_r2():
+    sc = simple(no_snapshot_row=True, entries=[entry(12345, 51, None)], history={"a": [T1]})
+    acts = sc.run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "eid_mismatch")]
+    assert (acts[0].file_id, acts[0].fid) == (1, 12345)
+
+
+def test_eid_mismatch_blocks_r2b():
+    sc = simple(no_snapshot_row=True, entries=[entry(12345, 51, None), entry(999, 50, T1)], history={"a": [T3]})
+    acts = sc.run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "eid_mismatch")]
+
+
+def test_eid_superset_in_snapshot_is_mismatch():
+    sc = simple(entries=[entry(12345, 51, None)], history={"a": [T1]})  # snapshot {50, 51}, Shoko {50}
+    assert reports(sc.run()) == [("R4", "eid_mismatch")]
+
+
+def test_snapshot_without_eid_for_fid_is_not_a_mismatch():
+    sc = simple(no_snapshot_row=True, entries=[entry(12345, None, None)], history={"a": [T1]})
+    (a,) = sc.run()
+    assert (a.kind, a.rule, a.file_id) == (ActionKind.SET_FILE_WATCHED, "R2", 1)
+
+
+def test_multi_episode_file_with_matching_eids_sets():
+    sc = simple(files=[shoko(1, 12345, [50, 51], "/p/x.mkv")], entries=[entry(12345, 51, None)], history={"a": [T1]})
+    (a,) = sc.run()
+    assert (a.rule, a.eids) == ("R2", (50, 51))

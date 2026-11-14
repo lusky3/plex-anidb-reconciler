@@ -66,9 +66,12 @@ class MyListIndex:
         self._watched_fids: set[int] = set()
         self._all_fids: set[int] = set()
         self._views: dict[int, list[datetime]] = defaultdict(list)
+        self._fid_eids: dict[int, set[int]] = defaultdict(set)
         for entry in entries:
             if entry.fid:
                 self._all_fids.add(entry.fid)
+                if entry.eid is not None:
+                    self._fid_eids[entry.fid].add(entry.eid)
             if entry.viewed_at is None:
                 continue
             if entry.fid:
@@ -81,6 +84,10 @@ class MyListIndex:
 
     def fid_watched(self, fid: int | None) -> bool:
         return bool(fid) and fid in self._watched_fids
+
+    def eids_for_fid(self, fid: int | None) -> frozenset[int]:
+        """Episodes AniDB links this file to (every snapshot entry for the fid with an EpisodeID)."""
+        return frozenset(self._fid_eids.get(fid, ())) if fid else frozenset()
 
     def episode_watched_at(self, eid: int) -> list[datetime]:
         return list(self._views.get(eid, []))

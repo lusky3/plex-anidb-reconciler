@@ -27,6 +27,9 @@ class _Watched:
     def has_fid(self, fid: int | None) -> bool:
         return self._ml.has_fid(fid)
 
+    def eids_for_fid(self, fid: int | None) -> frozenset[int]:
+        return self._ml.eids_for_fid(fid)
+
     def fid_watched(self, fid: int | None) -> bool:
         return self._ml.fid_watched(fid) or (bool(fid) and fid in self._fids)
 
@@ -110,6 +113,14 @@ def _plan_item(
             out.append(_report("R4", "not_in_snapshot", rk, f))
             continue
         watched_f = [e for e in f.eids if e in watched]
+        if watched_f and len(watched_f) < len(f.eids):
+            out.append(_report("R4", "partial_episode", rk, f))
+            continue
+        anidb_eids = mylist.eids_for_fid(f.fid)
+        if anidb_eids and anidb_eids != set(f.eids):
+            # AniDB and Shoko link this file to different episodes: never write (spec R4)
+            out.append(_report("R4", "eid_mismatch", rk, f))
+            continue
         if not watched_f:
             if plays_all:
                 when = min(plays_all)
@@ -125,8 +136,6 @@ def _plan_item(
                 out.append(_report("R4", "stale_snapshot", rk, f, when))
             else:
                 out.append(_set("R2", "new_watch", rk, f, when))
-        elif len(watched_f) < len(f.eids):
-            out.append(_report("R4", "partial_episode", rk, f))
         else:
             cutoff = mylist.max_watch(f.eids)
             if f.created_at is None:
