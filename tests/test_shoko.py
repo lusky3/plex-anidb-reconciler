@@ -24,7 +24,7 @@ def test_list_files_parses_recognised_and_manual():
     files = make_client().list_files()
     assert [f.file_id for f in files] == [1, 2, 3]
     assert (files[0].fid, files[0].eids, files[0].manual_link) == (12345, (50,), False)
-    assert files[0].abs_paths == ("/mnt/media/TV/tv_anime/A/Season 01/x.mkv",)
+    assert files[0].abs_paths == ("/shoko/anime/A/Season 01/x.mkv",)
     assert (files[1].fid, files[1].eids, files[1].manual_link) == (None, (70,), True)
     assert files[2].eids == (60, 61)
 

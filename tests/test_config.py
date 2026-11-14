@@ -7,13 +7,13 @@ BASE = {
     "SHOKO_API_KEY": "shoko-secret",
     "PLEX_URL": "http://plex:32400",
     "PLEX_TOKEN": "plex-secret",
-    "PLEX_SECTIONS": "4,5",
+    "PLEX_SECTIONS": "3,7",
 }
 
 
 def test_defaults():
     s = Settings.from_env(BASE)
-    assert s.plex_sections == (4, 5)
+    assert s.plex_sections == (3, 7)
     assert s.r2b_policy == "record"
     assert s.max_writes == 500
     assert s.snapshot_max_age_h == 26

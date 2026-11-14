@@ -28,7 +28,7 @@ def test_list_episodes_parses_parts_and_unwatched():
     )
     items = make_client().list_episodes(4)
     assert [i.rating_key for i in items] == ["100", "101", "102"]
-    assert items[0].paths == ("/data/a/e1.mkv", "/data/a/e1b.mkv")
+    assert items[0].paths == ("/plex/a/e1.mkv", "/plex/a/e1b.mkv")
     assert items[0].view_count == 2
     assert items[0].last_viewed_at == datetime.fromtimestamp(1682971200, UTC)
     assert items[0].last_viewed_at.tzinfo is not None
