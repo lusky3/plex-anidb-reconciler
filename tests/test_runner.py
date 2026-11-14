@@ -533,3 +533,27 @@ def test_shoko_index_cache_tied_to_shoko_url(env):
     assert route.call_count == 3
     go(env, apply=False, now=now.replace(minute=30))
     assert route.call_count == 3  # same server, within TTL: cached
+
+
+@pytest.mark.parametrize("raw", ["-1", "x"])
+def test_cli_rejects_negative_limit(env, monkeypatch, raw, capsys):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["apply", "--limit", raw])
+    assert ei.value.code == 2
+    assert "--limit" in capsys.readouterr().err
+
+
+def test_cli_accepts_zero_limit(env, monkeypatch):
+    seen = {}
+
+    def fake(s, **kw):
+        seen.update(kw)
+        return __import__("plex_anidb_reconciler.runner", fromlist=["RunResult"]).RunResult("x", {}, Path("r"))
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli, "run_once", fake)
+    assert cli.main(["apply", "--limit", "0"]) == 0
+    assert seen["limit"] == 0

@@ -21,6 +21,16 @@ def _rules(raw: str) -> frozenset[str]:
     return rules
 
 
+def _limit(raw: str) -> int:
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer >= 0") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be an integer >= 0")
+    return value
+
+
 def _add_filters(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rules", type=_rules, default=None, help="only run these rules (comma list of R1,R2,R2b)")
     p.add_argument("--file-id", type=int, default=None, help="only act on this Shoko file id")
@@ -32,7 +42,7 @@ def _parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("plan", help="dry run: report what would change (uncapped)")
     _add_filters(pp)
     ap = sub.add_parser("apply", help="apply changes (capped by MAX_WRITES)")
-    ap.add_argument("--limit", type=int, default=None, help="maximum writes this run")
+    ap.add_argument("--limit", type=_limit, default=None, help="maximum writes this run")
     _add_filters(ap)
     sub.add_parser("serve", help="run the scheduled service and /trigger endpoint")
     return p

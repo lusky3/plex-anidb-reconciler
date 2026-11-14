@@ -1,5 +1,6 @@
 """Map Plex file paths to Shoko files."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from plex_anidb_reconciler.models import ShokoFile
@@ -16,7 +17,7 @@ def _key(path: str) -> str:
 
 
 class PathMatcher:
-    def __init__(self, files: list[ShokoFile], path_map: list[tuple[str, str]]):
+    def __init__(self, files: Iterable[ShokoFile], path_map: Iterable[tuple[str, str]]):
         self._map = sorted(((a.rstrip("/"), b.rstrip("/")) for a, b in path_map), key=lambda m: -len(m[0]))
         self._exact: dict[str, dict[int, ShokoFile]] = {}
         self._by_key: dict[str, dict[int, ShokoFile]] = {}
