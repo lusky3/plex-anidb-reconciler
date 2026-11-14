@@ -1,4 +1,5 @@
-from plex_anidb_reconciler.report import prune_reports
+from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.report import prune_reports, summarize
 
 
 def test_prune_keeps_newest_by_run_id(tmp_path):
@@ -12,3 +13,32 @@ def test_prune_keeps_newest_by_run_id(tmp_path):
 
 def test_prune_missing_dir_is_noop(tmp_path):
     prune_reports(tmp_path / "nope", keep=2)
+
+
+def _act(kind, rule, reason):
+    return Action(kind, rule, "rk", None, None, (), None, reason)
+
+
+def test_summary_splits_reports_by_reason_and_writes_by_status():
+    rep = ActionKind.REPORT
+    rows = [
+        (_act(rep, "R4", "no_shoko_match"), "reported", ""),
+        (_act(rep, "R4", "no_shoko_match"), "reported", ""),
+        (_act(rep, "R4", "fallback_match"), "reported", ""),
+        (_act(rep, "R2b", "no_playback"), "reported", ""),
+        (_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "dry_run", ""),
+        (_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "capped", ""),
+        (_act(ActionKind.MARK_PLEX_PLAYED, "R1", "anidb_episode_watched"), "dry_run", ""),
+    ]
+    assert summarize(rows).splitlines() == [
+        "R1 dry_run: 1",
+        "R2 capped: 1",
+        "R2 dry_run: 1",
+        "R2b reported no_playback: 1",
+        "R4 reported fallback_match: 1",
+        "R4 reported no_shoko_match: 2",
+    ]
+
+
+def test_summary_empty():
+    assert summarize([]) == "no actions"
