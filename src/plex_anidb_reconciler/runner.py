@@ -13,7 +13,7 @@ import httpx
 
 from plex_anidb_reconciler.config import Settings
 from plex_anidb_reconciler.ledger import Ledger
-from plex_anidb_reconciler.models import Action, ActionKind, ShokoFile
+from plex_anidb_reconciler.models import Action, ActionKind, Rule, ShokoFile, SnapshotState, Status
 from plex_anidb_reconciler.mylist import MyListIndex, SnapshotError, load_mylist, snapshot_age, snapshot_is_fresh
 from plex_anidb_reconciler.paths import PathMatcher
 from plex_anidb_reconciler.plex import PlexClient, PlexError
@@ -22,7 +22,7 @@ from plex_anidb_reconciler.rules import plan
 from plex_anidb_reconciler.shoko import ShokoClient, ShokoError
 
 log = logging.getLogger(__name__)
-EXECUTABLE_RULES = ("R1", "R2", "R2b")
+EXECUTABLE_RULES = (Rule.R1, Rule.R2, Rule.R2B)
 KEEP_REPORTS = 200
 
 
@@ -37,7 +37,7 @@ class RunResult:
     run_id: str
     counts: dict[str, int]
     report_path: Path
-    snapshot: str = "ok"  # ok | stale | unavailable
+    snapshot: SnapshotState = SnapshotState.OK
 
 
 def build_clients(settings: Settings, http: httpx.Client) -> Clients:
@@ -122,28 +122,28 @@ def _shoko_changed(a: Action, current: ShokoFile) -> bool:
     )
 
 
-def _execute(a: Action, clients: Clients) -> tuple[str, str]:
+def _execute(a: Action, clients: Clients) -> tuple[Status, str]:
     try:
         if a.kind is ActionKind.MARK_PLEX_PLAYED:
             if a.rating_key is None:
-                return "failed", "invalid_action"
+                return Status.FAILED, "invalid_action"
             clients.plex.mark_played(a.rating_key)
         else:
             if a.file_id is None or a.when is None:
-                return "failed", "invalid_action"
+                return Status.FAILED, "invalid_action"
             if _shoko_changed(a, clients.shoko.get_file(a.file_id)):
-                return "failed", "shoko_changed"
+                return Status.FAILED, "shoko_changed"
             clients.shoko.set_watched(a.file_id, a.when)
     except (ShokoError, PlexError) as exc:
-        return "failed", str(exc)
-    return "applied", ""
+        return Status.FAILED, str(exc)
+    return Status.APPLIED, ""
 
 
-def _selected(a: Action, rules: frozenset[str] | None, file_id: int | None) -> bool:
+def _selected(a: Action, rules: frozenset[Rule] | None, file_id: int | None) -> bool:
     return (rules is None or a.rule in rules) and (file_id is None or a.file_id == file_id)
 
 
-def _finish(rows: list[tuple[Action, str, str]], report_path: Path) -> None:
+def _finish(rows: list[tuple[Action, Status, str]], report_path: Path) -> None:
     write_report(rows, report_path)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
@@ -155,7 +155,7 @@ def run_once(
     limit: int | None,
     now: datetime,
     clients: Clients | None = None,
-    rules: frozenset[str] | None = None,
+    rules: frozenset[Rule] | None = None,
     file_id: int | None = None,
     stop: threading.Event | None = None,
 ) -> RunResult:
@@ -174,14 +174,14 @@ def run_once(
         _finish([], report_path)
         print("snapshot_unavailable: no actions planned")
         log.warning("run %s: MyList snapshot unavailable, no actions planned", run_id)
-        return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, "unavailable")
+        return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE)
     fresh = snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h))
 
     own_http = None
     if clients is None:
         own_http = httpx.Client(timeout=60)
         clients = build_clients(settings, own_http)
-    rows: list[tuple[Action, str, str]] = []
+    rows: list[tuple[Action, Status, str]] = []
     changed = 0
     try:
         ledger = Ledger(Path(settings.data_dir) / "ledger.sqlite")
@@ -201,27 +201,27 @@ def run_once(
             r1 = [a for a in actions if a.kind is ActionKind.MARK_PLEX_PLAYED]
             sets = [a for a in actions if a.kind is ActionKind.SET_FILE_WATCHED]
             # every R2 before any R2b: an R2b may depend on an R2 of this run (Action.depends_on_file_id)
-            sets = [a for a in sets if a.rule != "R2b"] + [a for a in sets if a.rule == "R2b"]
-            rows = [(a, "reported", "") for a in actions if a.kind is ActionKind.REPORT]
+            sets = [a for a in sets if a.rule is not Rule.R2B] + [a for a in sets if a.rule is Rule.R2B]
+            rows = [(a, Status.REPORTED, "") for a in actions if a.kind is ActionKind.REPORT]
             executable = [a for a in r1 + sets if _selected(a, rules, file_id)]
 
             cap = settings.max_writes if limit is None else min(limit, settings.max_writes)
             budget = max(cap, 0)
-            set_status: dict[int, str] = {}  # file_id -> status of its SET in this run
-            ok = "applied" if apply else "dry_run"
+            set_status: dict[int, Status] = {}  # file_id -> status of its SET in this run
+            ok = Status.APPLIED if apply else Status.DRY_RUN
             for a in executable:
                 key = a.rating_key if a.kind is ActionKind.MARK_PLEX_PLAYED else a.file_id
                 detail = ""
                 if ledger.seen_success(a.kind, key):
-                    status = "skipped_ledger"
+                    status = Status.SKIPPED_LEDGER
                 elif a.depends_on_file_id is not None and set_status.get(a.depends_on_file_id) != ok:
-                    status, detail = "skipped", "prerequisite_not_applied"  # CSV only; reconsidered next run
+                    status, detail = Status.SKIPPED, "prerequisite_not_applied"  # CSV only; reconsidered next run
                 elif not apply:
-                    status = "dry_run"
+                    status = Status.DRY_RUN
                 elif stop is not None and stop.is_set():
-                    status, detail = "skipped", "shutdown"  # CSV only; re-planned next run
+                    status, detail = Status.SKIPPED, "shutdown"  # CSV only; re-planned next run
                 elif budget <= 0:
-                    status = "capped"
+                    status = Status.CAPPED
                 else:
                     budget -= 1
                     status, detail = _execute(a, clients)
@@ -242,6 +242,6 @@ def run_once(
     counts = dict(Counter(s for _, s, _ in rows))
     if changed:
         counts["shoko_changed"] = changed
-    snapshot = "ok" if fresh else "stale"
+    snapshot = SnapshotState.OK if fresh else SnapshotState.STALE
     log.info("run %s (%s, snapshot %s): %s", run_id, "apply" if apply else "plan", snapshot, counts or "no actions")
     return RunResult(run_id, counts, report_path, snapshot)

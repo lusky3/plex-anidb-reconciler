@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from plex_anidb_reconciler.models import R2bPolicy
+
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN")
 
 
@@ -92,7 +94,7 @@ class Settings:
     mylist_path: str
     data_dir: str
     path_map: tuple[tuple[str, str], ...]
-    r2b_policy: str
+    r2b_policy: R2bPolicy
     snapshot_max_age_h: int
     max_writes: int
     poll_minutes: int
@@ -111,9 +113,10 @@ class Settings:
         def opt(name: str, default: str) -> str:
             return (env.get(name) or "").strip() or default
 
-        policy = opt("R2B_POLICY", "record")
-        if policy not in ("record", "ignore"):
-            raise ValueError("R2B_POLICY must be 'record' or 'ignore'")
+        try:
+            policy = R2bPolicy(opt("R2B_POLICY", R2bPolicy.RECORD))
+        except ValueError:
+            raise ValueError("R2B_POLICY must be 'record' or 'ignore'") from None
 
         tz_name = env.get("SHOKO_TZ")
         tz_name = "America/New_York" if tz_name is None else tz_name.strip()

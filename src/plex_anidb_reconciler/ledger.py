@@ -7,9 +7,9 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch
+from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, Status
 
-STATUSES = ("applied", "failed")
+STATUSES = (Status.APPLIED, Status.FAILED)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -86,7 +86,7 @@ class Ledger:
             for file_id, fid, eids, when_ts in rows
         ]
 
-    def record(self, run_id: str, action: Action, status: str, detail: str = "") -> None:
+    def record(self, run_id: str, action: Action, status: Status | str, detail: str = "") -> None:
         if status not in STATUSES:
             raise ValueError(f"unknown ledger status: {status}")
         self._db.execute(
@@ -101,7 +101,7 @@ class Ledger:
                 action.fid,
                 ",".join(str(e) for e in action.eids),
                 iso_utc(action.when) or None,
-                status,
+                str(status),
                 detail,
                 datetime.now(UTC).isoformat(),
             ),

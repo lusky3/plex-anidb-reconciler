@@ -5,12 +5,12 @@ from collections import Counter
 from pathlib import Path
 
 from plex_anidb_reconciler.ledger import iso_utc
-from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.models import Action, ActionKind, Status
 
 COLUMNS = ["rule", "kind", "status", "rating_key", "file_id", "fid", "eids", "when", "reason", "detail"]
 
 
-def write_report(rows: list[tuple[Action, str, str]], path: Path) -> None:
+def write_report(rows: list[tuple[Action, Status, str]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -45,12 +45,12 @@ def prune_reports(directory: Path, keep: int = 200) -> None:
             pass
 
 
-def _summary_key(a: Action, status: str) -> str:
+def _summary_key(a: Action, status: Status) -> str:
     """Writes group by rule + status; reports also by reason (e.g. ``R4 reported no_shoko_match``)."""
     return f"{a.rule} {status} {a.reason}" if a.kind is ActionKind.REPORT else f"{a.rule} {status}"
 
 
-def summarize(rows: list[tuple[Action, str, str]]) -> str:
+def summarize(rows: list[tuple[Action, Status, str]]) -> str:
     counts = Counter(_summary_key(a, status) for a, status, _ in rows)
     if not counts:
         return "no actions"

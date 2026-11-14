@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import Enum, StrEnum
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,36 @@ class PlexItem:
     last_viewed_at: datetime | None
 
 
+class Rule(StrEnum):
+    R1 = "R1"  # AniDB episode watched -> mark the Plex item played
+    R2 = "R2"  # new watch -> that exact Shoko file
+    R2B = "R2b"  # re-watch with a different release
+    R4 = "R4"  # ambiguity: report only
+
+
+class Status(StrEnum):
+    """Outcome of one action in a run (CSV ``status`` column; only APPLIED/FAILED reach the ledger)."""
+
+    APPLIED = "applied"
+    FAILED = "failed"
+    DRY_RUN = "dry_run"
+    REPORTED = "reported"
+    CAPPED = "capped"
+    SKIPPED = "skipped"
+    SKIPPED_LEDGER = "skipped_ledger"
+
+
+class R2bPolicy(StrEnum):
+    RECORD = "record"
+    IGNORE = "ignore"
+
+
+class SnapshotState(StrEnum):
+    OK = "ok"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
 class ActionKind(Enum):
     MARK_PLEX_PLAYED = "mark_plex_played"
     SET_FILE_WATCHED = "set_file_watched"
@@ -42,7 +72,7 @@ class ActionKind(Enum):
 @dataclass(frozen=True)
 class Action:
     kind: ActionKind
-    rule: str  # one of R1, R2, R2b, R4
+    rule: Rule
     rating_key: str | None
     file_id: int | None
     fid: int | None

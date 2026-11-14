@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from plex_anidb_reconciler.config import Settings, parse_listen
+from plex_anidb_reconciler.models import Status
 from plex_anidb_reconciler.runner import run_once
 
 log = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class Service:
                 result = self._run_fn(self.settings, apply=True, limit=None, now=self._clock(), stop=self._stop)
                 run_id = result.run_id
                 snapshot = getattr(result, "snapshot", None)
-                status = "failed" if result.counts.get("failed") else "ok"
+                status = Status.FAILED.value if result.counts.get(Status.FAILED) else "ok"
             except Exception as exc:  # noqa: BLE001 - daemon must survive any run failure
                 status = f"error:{type(exc).__name__}"  # type only: messages may contain URLs
                 log.error("reconcile run failed: %s", type(exc).__name__)

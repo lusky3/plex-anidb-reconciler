@@ -7,18 +7,18 @@ import sys
 from datetime import UTC, datetime
 
 from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.models import Rule, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import EXECUTABLE_RULES, run_once
 from plex_anidb_reconciler.serve import healthcheck, serve
 from plex_anidb_reconciler.shoko import ShokoError
 
 
-def _rules(raw: str) -> frozenset[str]:
-    rules = frozenset(r.strip() for r in raw.split(",") if r.strip())
-    unknown = rules - set(EXECUTABLE_RULES)
-    if not rules or unknown:
+def _rules(raw: str) -> frozenset[Rule]:
+    names = {r.strip() for r in raw.split(",") if r.strip()}
+    if not names or not names <= set(EXECUTABLE_RULES):
         raise argparse.ArgumentTypeError(f"rules must be a comma list of {','.join(EXECUTABLE_RULES)}")
-    return rules
+    return frozenset(Rule(r) for r in names)
 
 
 def _limit(raw: str) -> int:
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"run failed: {type(exc).__name__}", file=sys.stderr)
         return 2
     print(f"report: {result.report_path}")
-    return 2 if result.counts.get("failed") else 0
+    return 2 if result.counts.get(Status.FAILED) else 0
 
 
 if __name__ == "__main__":
