@@ -13,7 +13,9 @@ pxar serve                                                # periodic runs plus P
 ```
 
 `--rules` and `--file-id` restrict which writes run; reports are always listed. `apply` runs R1 before
-R2/R2b, so a canary write to AniDB is `pxar apply --rules R2 --limit 1`.
+R2, and every R2 before any R2b, so a canary write to AniDB is `pxar apply --rules R2 --limit 1`. An R2b
+that relies on an R2 planned in the same run is only executed once that R2 was applied in this run;
+otherwise it is listed as `skipped` (`detail` column: `prerequisite_not_applied`) and reconsidered next run.
 
 ## Docker
 
@@ -28,16 +30,20 @@ Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See
 | `SHOKO_TZ` | `America/New_York` | Timezone for dates sent to Shoko |
 | `PLEX_URL` | required | Plex server URL |
 | `PLEX_TOKEN` | required | Plex token |
-| `PLEX_SECTIONS` | `4,5` | Comma-separated Plex library section ids |
+| `PLEX_SECTIONS` | `4,5` | Comma-separated positive Plex library section ids (must not be empty) |
 | `MYLIST_PATH` | `/mylist/mylist.json` | AniDB MyList snapshot |
 | `DATA_DIR` | `/data` | State directory |
 | `PATH_MAP` | empty | `plexprefix=shokoprefix[;...]` |
 | `R2B_POLICY` | `record` | `record` or `ignore` |
-| `SNAPSHOT_MAX_AGE_H` | `26` | Max snapshot age in hours for write rules |
-| `MAX_WRITES` | `500` | Apply cap per run |
-| `POLL_MINUTES` | `15` | Poll interval |
-| `SHOKO_INDEX_TTL_MIN` | `60` | Shoko index cache TTL |
-| `LISTEN` | `0.0.0.0:8787` | Listen address |
+| `SNAPSHOT_MAX_AGE_H` | `26` | Max snapshot age in hours for write rules (>= 1) |
+| `MAX_WRITES` | `500` | Apply cap per run (>= 1) |
+| `POLL_MINUTES` | `15` | Poll interval (>= 1) |
+| `SHOKO_INDEX_TTL_MIN` | `60` | Shoko index cache TTL in minutes; `0` = no cache (fetch every run) |
+| `LISTEN` | `0.0.0.0:8787` | Listen address: `host:port` or `[ipv6]:port`, port 1-65535 |
+| `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0) |
+
+Blank optional variables fall back to their defaults; invalid values stop the program with a config error
+(exit 1) that names the variable, never its value. `PATH_MAP` sides are trimmed and must be non-empty.
 
 ## Accepted risks
 

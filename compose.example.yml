@@ -22,8 +22,8 @@ services:
       # Plex and Shoko see the files under different prefixes: plexprefix=shokoprefix[;...]
       # (see docs/runbook.md step 5).
       # PATH_MAP: /data/TV=/mnt/media/TV
-      # Secrets come from Doppler (project `misc`, config `dev` holds SHOKO_API_KEY),
-      # e.g. `doppler run -- docker compose up -d`.
+      # Secrets come from Doppler (project `misc`, config `dev` holds SHOKO_API_KEY and PLEX_TOKEN;
+      # add PLEX_TOKEN there if missing), e.g. `doppler run --project misc --config dev -- docker compose up -d`.
       SHOKO_API_KEY: ${SHOKO_API_KEY}
       PLEX_TOKEN: ${PLEX_TOKEN}
 
