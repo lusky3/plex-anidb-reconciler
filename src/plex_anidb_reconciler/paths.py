@@ -18,11 +18,11 @@ def _key(path: str) -> str:
 class PathMatcher:
     def __init__(self, files: list[ShokoFile], path_map: list[tuple[str, str]]):
         self._map = sorted(((a.rstrip("/"), b.rstrip("/")) for a, b in path_map), key=lambda m: -len(m[0]))
-        self._exact: dict[str, ShokoFile] = {}
+        self._exact: dict[str, dict[int, ShokoFile]] = {}
         self._by_key: dict[str, dict[int, ShokoFile]] = {}
         for f in files:
             for p in f.abs_paths:
-                self._exact.setdefault(p, f)
+                self._exact.setdefault(p, {})[f.file_id] = f
                 self._by_key.setdefault(_key(p), {})[f.file_id] = f
 
     def _rewrite(self, path: str) -> str:
@@ -32,10 +32,7 @@ class PathMatcher:
         return path
 
     def match(self, plex_path: str) -> ShokoFile | Ambiguous | None:
-        hit = self._exact.get(self._rewrite(plex_path))
-        if hit is not None:
-            return hit
-        cands = self._by_key.get(_key(plex_path), {})
+        cands = self._exact.get(self._rewrite(plex_path)) or self._by_key.get(_key(plex_path), {})
         if len(cands) == 1:
             return next(iter(cands.values()))
         if len(cands) > 1:

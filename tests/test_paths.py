@@ -57,3 +57,8 @@ def test_exact_match_case_sensitive_but_fallback_rescues():
 def test_no_match_returns_none():
     f = sf(1, "/r1/Season 01/x.mkv")
     assert PathMatcher([f], MAP).match("/data/TV/Q/y.mkv") is None
+
+
+def test_duplicate_exact_path_is_ambiguous():
+    a, b = sf(7, "/mnt/media/TV/A/x.mkv"), sf(3, "/mnt/media/TV/A/x.mkv")
+    assert PathMatcher([a, b], []).match("/mnt/media/TV/A/x.mkv") == Ambiguous((3, 7))
