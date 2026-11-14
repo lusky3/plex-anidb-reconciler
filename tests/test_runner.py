@@ -906,3 +906,32 @@ def test_snapshot_unavailable_still_writes_html(env):
     os.remove(env["MYLIST_PATH"])
     res = go(env, apply=True)
     assert "no actions" in res.report_path.with_suffix(".html").read_text(encoding="utf-8")
+
+
+# --- run scoped to rating keys (/trigger with a rating key) ---
+
+
+@respx.mock
+def test_scoped_run_plans_only_those_rating_keys(env):
+    scrobble, put = mock_servers()
+    res = go(env, apply=True, rating_keys=frozenset({"c"}))
+    assert res.counts == {"applied": 1}
+    assert scrobble.call_count == 0 and put.call_count == 1
+    assert {r["rating_key"] for r in _csv_dicts(res.report_path)} == {"c"}
+    assert mock_servers.index.call_count == 1  # Shoko index, Plex sections and history still loaded
+
+
+@respx.mock
+def test_scoped_run_unknown_key_plans_nothing_and_none_is_full(env):
+    mock_servers()
+    assert go(env, apply=False, rating_keys=frozenset({"zzz"})).counts == {}
+    assert go(env, apply=False, rating_keys=None).counts == {"dry_run": 3}
+
+
+@respx.mock
+def test_scoped_run_keeps_every_gate(env):
+    """A scoped run still respects the snapshot freshness gate."""
+    _, put = mock_servers()
+    make_stale(env)
+    res = go(env, apply=True, rating_keys=frozenset({"c"}))
+    assert put.call_count == 0 and res.counts == {"reported": 1}

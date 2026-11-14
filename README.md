@@ -12,6 +12,11 @@ pxar apply [--rules R1,R2,R2b] [--file-id N] [--limit N] # apply changes (capped
 pxar serve                                                # periodic runs plus POST /trigger on LISTEN
 ```
 
+`serve` runs a full reconcile every `POLL_MINUTES`. `POST /trigger` queues an immediate run: with a JSON body
+`{"rating_key": "123"}` (Tautulli Webhook agent, JSON data `{"rating_key": "{rating_key}"}`) only that Plex item
+is planned; without a usable key it is a full run. Triggers that arrive during a run are merged into the next
+run (the union of their rating keys, or a full run if any was keyless).
+
 Each run writes `reports/<run_id>.csv` and a self-contained `reports/<run_id>.html` (summary counts, then the
 same rows; the newest 200 of each are kept) under `DATA_DIR`, one row per action: `rule, kind, status,
 rating_key, file_id, fid, eids, when, reason, detail, aid, release_group, anidb_state, anidb_viewdate`.

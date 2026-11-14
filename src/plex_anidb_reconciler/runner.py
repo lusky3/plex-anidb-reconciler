@@ -60,6 +60,24 @@ class RunResult:
 
 
 @dataclass(frozen=True)
+class RunScope:
+    """What a run covers. rating_keys: only plan these Plex items (None: all). rules/file_id: only execute
+    these writes (None: all); reports are always listed."""
+
+    rules: frozenset[Rule] | None = None
+    file_id: int | None = None
+    rating_keys: frozenset[str] | None = None
+
+    def plans(self, item: PlexItem) -> bool:
+        return self.rating_keys is None or item.rating_key in self.rating_keys
+
+    def executes(self, action: Action) -> bool:
+        return (self.rules is None or action.rule in self.rules) and (
+            self.file_id is None or action.file_id == self.file_id
+        )
+
+
+@dataclass(frozen=True)
 class Snapshot:
     index: MyListIndex
     fresh: bool
@@ -163,10 +181,13 @@ def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | None:
 
 
 def _plan_actions(
-    settings: Settings, clients: Clients, ledger: Ledger, snapshot: Snapshot, now: datetime
+    settings: Settings, clients: Clients, ledger: Ledger, snapshot: Snapshot, now: datetime, scope: RunScope
 ) -> list[Action]:
+    """Load the Shoko index and Plex state and plan. Every input is always loaded in full; a run scoped to
+    rating keys only plans those Plex items (every gate still applies)."""
     files = _shoko_index(settings, clients.shoko, now)
     items, history = _fetch_plex(settings, clients.plex)
+    items = [item for item in items if scope.plans(item)]
     return plan(
         items,
         history,
@@ -179,17 +200,13 @@ def _plan_actions(
     )
 
 
-def _selected(action: Action, rules: frozenset[Rule] | None, file_id: int | None) -> bool:
-    return (rules is None or action.rule in rules) and (file_id is None or action.file_id == file_id)
-
-
-def _execution_order(actions: list[Action], rules: frozenset[Rule] | None, file_id: int | None) -> list[Action]:
+def _execution_order(actions: list[Action], scope: RunScope) -> list[Action]:
     """R1 (Plex only) first, then every R2 before any R2b: an R2b may depend on an R2 of this run
     (Action.depends_on_file_id)."""
     marks = [a for a in actions if a.kind is ActionKind.MARK_PLEX_PLAYED]
     sets = [a for a in actions if a.kind is ActionKind.SET_FILE_WATCHED]
     ordered = marks + [a for a in sets if a.rule is not Rule.R2B] + [a for a in sets if a.rule is Rule.R2B]
-    return [a for a in ordered if _selected(a, rules, file_id)]
+    return [a for a in ordered if scope.executes(a)]
 
 
 # --- execution ---
@@ -388,8 +405,10 @@ def run_once(
     rules: frozenset[Rule] | None = None,
     file_id: int | None = None,
     stop: threading.Event | None = None,
+    rating_keys: frozenset[str] | None = None,
 ) -> RunResult:
     """rules/file_id restrict which executable actions (R1/R2/R2b) run; reports are always listed.
+    rating_keys (a /trigger for specific Plex items) restricts planning to those items; None plans all.
     Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions are recorded
     as skipped/shutdown (an in-flight write completes and is recorded first).
     Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
@@ -403,7 +422,8 @@ def run_once(
         _open_clients(settings, clients) as active,
         closing(Ledger(Path(settings.data_dir) / "ledger.sqlite")) as ledger,
     ):
-        actions = _plan_actions(settings, active, ledger, snapshot, now)
+        scope = RunScope(rules, file_id, rating_keys)
+        actions = _plan_actions(settings, active, ledger, snapshot, now, scope)
         executor = _Executor(
             run_id,
             ledger,
@@ -414,7 +434,7 @@ def run_once(
             file_state=snapshot.index.file_state,
         )
         reported = [Outcome(a, Status.REPORTED) for a in actions if a.kind is ActionKind.REPORT]
-        outcomes = reported + executor.run(_execution_order(actions, rules, file_id))
+        outcomes = reported + executor.run(_execution_order(actions, scope))
 
     _finish(outcomes, report_path, snapshot.index.file_state)
     return _summarise(run_id, outcomes, executor.shoko_changed, report_path, apply=apply, fresh=snapshot.fresh)

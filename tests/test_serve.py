@@ -36,8 +36,8 @@ class ObservedService(Service):
         super()._beat()
         self.beaten.set()
 
-    def run_pending_now(self):
-        super().run_pending_now()
+    def run_pending_now(self, rating_keys=None):
+        super().run_pending_now(rating_keys)
         with self._finished:
             self.runs_finished += 1
             self._finished.notify_all()
@@ -605,3 +605,87 @@ def test_health_loop_and_run_active_since_are_one_snapshot():
     finally:
         gate.set()
         stop_loop(svc, stop, t)
+
+
+# --- /trigger scoped to rating keys (Tautulli Webhook JSON data) ---
+
+
+def scoped_run_setup():
+    calls = []
+    gate = threading.Event()
+    first_started = threading.Event()
+
+    def run_fn(settings, **kw):
+        calls.append(kw)
+        first_started.set()
+        if len(calls) == 1:
+            gate.wait(30)  # hold the first run so triggers pile up behind it
+        return FakeResult(f"r{len(calls)}", {})
+
+    svc = make_service(run_fn)
+    server, base = start_http(svc)
+    stop = threading.Event()
+    t = threading.Thread(target=svc.loop, args=(stop,), daemon=True)
+    svc.request_run()
+    t.start()
+    assert first_started.wait(WAIT)
+    return svc, server, base, stop, t, calls, gate
+
+
+def teardown(svc, server, stop, t, gate):
+    gate.set()
+    stop.set()
+    svc.request_run()
+    t.join(2)
+    server.shutdown()
+    server.server_close()
+
+
+def test_trigger_rating_keys_coalesce_into_one_scoped_run():
+    svc, server, base, stop, t, calls, gate = scoped_run_setup()
+    try:
+        assert post(base + "/trigger", b'{"rating_key": "123"}')[0] == 202
+        assert post(base + "/trigger", b'{"rating_key": "456"}')[0] == 202
+        assert post(base + "/trigger", b'{"rating_key": 789}')[0] == 202  # a number works too
+        assert post(base + "/trigger", b'{"rating_key": "123"}')[0] == 202
+        gate.set()
+        assert svc.wait_runs(2)
+        assert not svc._event.is_set()
+        assert calls[0]["rating_keys"] is None  # startup run is full
+        assert calls[1]["rating_keys"] == frozenset({"123", "456", "789"})
+    finally:
+        teardown(svc, server, stop, t, gate)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"", b"x", b"{not json", b"[]", b'{"rating_key": null}', b'{"rating_key": ""}', b'{"rating_key": true}', b"{}"],
+    ids=["empty", "text", "bad_json", "list", "null", "blank", "bool", "no_key"],
+)
+def test_trigger_without_usable_key_means_full_run(body):
+    svc, server, base, stop, t, calls, gate = scoped_run_setup()
+    try:
+        assert post(base + "/trigger", b'{"rating_key": "123"}')[0] == 202
+        assert post(base + "/trigger", body)[0] == 202
+        gate.set()
+        assert svc.wait_runs(2)
+        assert calls[1]["rating_keys"] is None  # one keyless trigger widens the pending run to a full one
+    finally:
+        teardown(svc, server, stop, t, gate)
+
+
+def test_poll_tick_is_always_full():
+    svc = make_service(lambda s, **kw: FakeResult("a", {}))
+    svc.request_run("123")
+    assert svc._take_scope(triggered=False) is None
+    assert svc._take_scope(triggered=True) is None  # the tick consumed the pending key
+    svc.request_run("5")
+    assert svc._take_scope(triggered=True) == frozenset({"5"})
+
+
+def test_run_pending_now_passes_scope():
+    seen = []
+    svc = make_service(lambda s, **kw: seen.append(kw["rating_keys"]) or FakeResult("a", {}))
+    svc.run_pending_now()
+    svc.run_pending_now(frozenset({"9"}))
+    assert seen == [None, frozenset({"9"})]

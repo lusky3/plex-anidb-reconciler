@@ -39,6 +39,9 @@ class Service:
         self._clock = clock
         self._lock = threading.Lock()  # the only guard around run_fn
         self._event = threading.Event()  # pending-run flag; coalesces triggers
+        self._pending_lock = threading.Lock()  # guards _event together with the pending scope below
+        self._pending_full = False  # a pending trigger asked for a full run
+        self._pending_keys: set[str] = set()  # rating keys of pending scoped triggers
         self._state: dict = {"last_run_id": None, "last_status": None, "last_finished": None, "snapshot": None}
         self._state_lock = threading.Lock()
         self._heartbeat: datetime | None = None  # last loop iteration or finished run
@@ -66,8 +69,26 @@ class Service:
         limit = timedelta(minutes=2 * self.settings.poll_minutes + 5)
         return self._clock() - beat <= limit
 
-    def request_run(self) -> None:
-        self._event.set()
+    def request_run(self, rating_key: str | None = None) -> None:
+        """Queue a run: limited to ``rating_key`` or, without one, a full run. Pending requests coalesce
+        into one run: the union of their rating keys, or a full run if any of them was keyless."""
+        with self._pending_lock:
+            if rating_key is None:
+                self._pending_full = True
+            else:
+                self._pending_keys.add(rating_key)
+            self._event.set()
+
+    def _take_scope(self, *, triggered: bool) -> frozenset[str] | None:
+        """Consume the pending requests and return the next run's scope (None = full run). A poll tick
+        (not triggered) is always a full run, which also covers any key that arrived meanwhile."""
+        with self._pending_lock:
+            full = self._pending_full or not triggered or not self._pending_keys
+            keys = frozenset(self._pending_keys)
+            self._pending_full = False
+            self._pending_keys.clear()
+            self._event.clear()  # triggers arriving during the run set it again
+        return None if full else keys
 
     def health(self) -> dict:
         with self._state_lock:  # one acquisition: loop, run_active_since and the last-run fields agree
@@ -76,15 +97,22 @@ class Service:
                 out["run_active_since"] = self._run_started.astimezone(UTC).isoformat()
         return out
 
-    def run_pending_now(self) -> None:
-        """Run one reconcile (blocking if one is in flight). Never raises."""
+    def run_pending_now(self, rating_keys: frozenset[str] | None = None) -> None:
+        """Run one reconcile (blocking if one is in flight), limited to ``rating_keys`` if given. Never raises."""
         with self._lock:
             with self._state_lock:
                 self._run_started = self._clock()
             run_id = None
             snapshot = None
             try:
-                result = self._run_fn(self.settings, apply=True, limit=None, now=self._clock(), stop=self._stop)
+                result = self._run_fn(
+                    self.settings,
+                    apply=True,
+                    limit=None,
+                    now=self._clock(),
+                    stop=self._stop,
+                    rating_keys=rating_keys,
+                )
                 run_id = result.run_id
                 snapshot = getattr(result, "snapshot", None)
                 status = Status.FAILED.value if result.counts.get(Status.FAILED) else "ok"
@@ -107,11 +135,31 @@ class Service:
             self._stop = stop
         while not stop.is_set():
             self._beat()
-            self._event.wait(timeout=interval)  # a trigger wakes this immediately
+            triggered = self._event.wait(timeout=interval)  # a trigger wakes this immediately
             if stop.is_set():
                 break
-            self._event.clear()  # triggers arriving during the run set it again
-            self.run_pending_now()
+            self.run_pending_now(self._take_scope(triggered=triggered))
+
+
+MAX_RATING_KEY_DIGITS = 20
+
+
+def trigger_rating_key(body: bytes) -> str | None:
+    """The Plex rating key of a Tautulli Webhook JSON body ``{"rating_key": "123"}``, or None (full run) for
+    an empty or unparsable body, a missing key, or anything but a plain decimal id. Never logged."""
+    try:
+        data = json.loads(body)
+    except ValueError:  # also UnicodeDecodeError
+        return None
+    value = data.get("rating_key") if isinstance(data, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not (value.isascii() and value.isdigit() and len(value) <= MAX_RATING_KEY_DIGITS):
+        return None
+    return value
 
 
 def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
@@ -136,32 +184,35 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
             else:
                 self._json(404, {"error": "not found"})
 
-        def _drain_body(self) -> bool:
-            """Read and discard the whole request body (Tautulli payload). False: response already sent."""
+        def _read_body(self) -> bytes | None:
+            """Read the whole request body (Tautulli payload). None: response already sent."""
             raw = self.headers.get("Content-Length")
             if raw is None:
-                return True
+                return b""
             raw = raw.strip()
             if not raw.isdigit():  # also rejects negative and empty values
                 self._json(400, {"error": "bad Content-Length"}, close=True)
-                return False
+                return None
             remaining = int(raw)
             if remaining > MAX_BODY:
                 self._json(413, {"error": "body too large"}, close=True)
-                return False
+                return None
+            chunks = []
             while remaining > 0:
                 chunk = self.rfile.read(min(CHUNK, remaining))
                 if not chunk:
                     self.close_connection = True
-                    return False
+                    return None
+                chunks.append(chunk)
                 remaining -= len(chunk)
-            return True
+            return b"".join(chunks)
 
         def do_POST(self) -> None:
-            if not self._drain_body():
+            body = self._read_body()
+            if body is None:
                 return
             if self.path == "/trigger":
-                service.request_run()
+                service.request_run(trigger_rating_key(body))
                 self._json(202, {"status": "accepted"})
             else:
                 self._json(404, {"error": "not found"})
