@@ -10,17 +10,28 @@ MAP = [("/data/TV", "/mnt/media/TV")]
 
 
 def test_exact_match_with_prefix_map():
+    # Both files share the fallback key, so only the rewritten exact hit can pick one.
     f = sf(1, "/mnt/media/TV/tv_anime/A/Season 01/x.mkv")
-    assert PathMatcher([f], MAP).match("/data/TV/tv_anime/A/Season 01/x.mkv") == f
+    other = sf(2, "/elsewhere/A/Season 01/x.mkv")
+    m = PathMatcher([f, other], MAP)
+    assert m.match("/data/TV/tv_anime/A/Season 01/x.mkv") == f
 
 
-def test_exact_match_is_component_bounded_and_longest_wins():
-    f = sf(1, "/long/A/x.mkv")
-    m = PathMatcher([f], [("/data", "/short"), ("/data/TV", "/long")])
-    assert m.match("/data/TV/A/x.mkv") == f
-    g = sf(2, "/mnt/media/TVX/a/x.mkv")
-    # /data/TV must not rewrite /data/TVX/...; falls back on parent/filename
-    assert PathMatcher([g], MAP).match("/data/TVX/a/x.mkv") == g
+def test_exact_hit_beats_fallback_collision():
+    a, b = sf(1, "/r1/Season 01/x.mkv"), sf(2, "/r2/Season 01/x.mkv")
+    assert PathMatcher([a, b], [("/p", "/r2")]).match("/p/Season 01/x.mkv") == b
+
+
+def test_longest_prefix_wins():
+    long_f, short_f = sf(1, "/long/A/x.mkv"), sf(2, "/short/TV/A/x.mkv")
+    m = PathMatcher([long_f, short_f], [("/data", "/short"), ("/data/TV", "/long")])
+    assert m.match("/data/TV/A/x.mkv") == long_f
+
+
+def test_prefix_matches_only_on_component_boundary():
+    literal, decoy = sf(1, "/data/TVX/a/x.mkv"), sf(2, "/mnt/TVX/a/x.mkv")
+    m = PathMatcher([literal, decoy], [("/data/TV", "/mnt/TV")])
+    assert m.match("/data/TVX/a/x.mkv") == literal
 
 
 def test_fallback_unique_parent_filename():
