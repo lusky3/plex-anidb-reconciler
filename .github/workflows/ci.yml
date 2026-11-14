@@ -86,7 +86,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      # Pull requests: SBOM + provenance exported as a workflow artifact (nothing is pushed).
+      # Pull requests: export SBOM + provenance as a workflow artifact (nothing gets pushed).
       - if: github.event_name == 'pull_request'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -139,7 +139,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=plex-anidb-reconciler
             org.opencontainers.image.description=Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko
-            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/runbook.md
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/deployment.md
             org.opencontainers.image.vendor=${{ github.repository_owner }}
             org.opencontainers.image.base.name=gcr.io/distroless/cc-debian13:nonroot
           annotations: |

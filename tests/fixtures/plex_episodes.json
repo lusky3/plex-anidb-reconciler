@@ -1,6 +1,6 @@
 {"MediaContainer": {"size": 3, "totalSize": 3, "Metadata": [
  {"ratingKey": "100", "viewCount": 2, "lastViewedAt": 1682971200,
-  "Media": [{"Part": [{"file": "/data/a/e1.mkv"}, {"id": 9}]}, {"Part": [{"file": "/data/a/e1b.mkv"}]}]},
- {"ratingKey": "101", "Media": [{"Part": [{"file": "/data/a/e2.mkv"}]}]},
+  "Media": [{"Part": [{"file": "/plex/a/e1.mkv"}, {"id": 9}]}, {"Part": [{"file": "/plex/a/e1b.mkv"}]}]},
+ {"ratingKey": "101", "Media": [{"Part": [{"file": "/plex/a/e2.mkv"}]}]},
  {"ratingKey": "102"}
 ]}}

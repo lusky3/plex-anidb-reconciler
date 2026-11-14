@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from plex_anidb_reconciler.models import R2bPolicy
 
-REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN")
+REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN", "PLEX_SECTIONS")
 
 
 def _is_ascii_int(raw: str) -> bool:
@@ -119,7 +119,7 @@ class Settings:
             raise ValueError("R2B_POLICY must be 'record' or 'ignore'") from None
 
         tz_name = env.get("SHOKO_TZ")
-        tz_name = "America/New_York" if tz_name is None else tz_name.strip()
+        tz_name = "UTC" if tz_name is None else tz_name.strip()
         try:
             tz = ZoneInfo(tz_name)
         except ZoneInfoNotFoundError, ValueError:
@@ -128,14 +128,13 @@ class Settings:
         listen = opt("LISTEN", "0.0.0.0:8787")
         parse_listen(listen)
 
-        sections = env.get("PLEX_SECTIONS")
         return cls(
             shoko_url=required["SHOKO_URL"],
             shoko_api_key=required["SHOKO_API_KEY"],
             plex_url=required["PLEX_URL"],
             plex_token=required["PLEX_TOKEN"],
             shoko_tz=tz,
-            plex_sections=_parse_sections("4,5" if sections is None else sections),
+            plex_sections=_parse_sections(required["PLEX_SECTIONS"]),
             mylist_path=opt("MYLIST_PATH", "/mylist/mylist.json"),
             data_dir=opt("DATA_DIR", "/data"),
             path_map=_parse_path_map(env.get("PATH_MAP", "")),

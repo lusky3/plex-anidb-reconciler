@@ -34,6 +34,12 @@ def _limit(raw: str) -> int:
 def _add_filters(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rules", type=_rules, default=None, help="only run these rules (comma list of R1,R2,R2b)")
     p.add_argument("--file-id", type=int, default=None, help="only act on this Shoko file id")
+    p.add_argument(
+        "--rating-key",
+        action="append",
+        default=None,
+        help="only act on this Plex item (repeatable); everything is still planned as in a full run",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -71,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             now=datetime.now(UTC),
             rules=args.rules,
             file_id=args.file_id,
+            rating_keys=frozenset(args.rating_key) if args.rating_key else None,
         )
     except (ShokoError, PlexError) as exc:
         print(f"run failed: {exc}", file=sys.stderr)

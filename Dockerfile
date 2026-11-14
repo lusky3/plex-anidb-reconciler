@@ -1,6 +1,6 @@
 # Runtime is distroless cc (glibc, libgcc/libstdc++, CA certs, tzdata; no shell, no package manager) with a
 # uv-managed standalone CPython 3.14, because distroless/python3 ships Debian's 3.11.
-# Base images are pinned by digest; Dependabot keeps them current.
+# Each FROM pins its base image by digest, and Dependabot keeps the digests current.
 
 FROM ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b AS uv
 
@@ -38,7 +38,7 @@ LABEL org.opencontainers.image.title="plex-anidb-reconciler" \
       org.opencontainers.image.description="Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko" \
       org.opencontainers.image.source="https://github.com/lusky3/plex-anidb-reconciler" \
       org.opencontainers.image.url="https://github.com/lusky3/plex-anidb-reconciler" \
-      org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/runbook.md" \
+      org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/deployment.md" \
       org.opencontainers.image.vendor="lusky3" \
       org.opencontainers.image.base.name="gcr.io/distroless/cc-debian13:nonroot"
 # The venv's interpreter symlinks into /python, so it must keep the same path.
@@ -48,12 +48,13 @@ COPY --from=build --chown=10001:10001 /out/data /data
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-# uid 10001 (not distroless's 65532) so the host /data ownership in docs/runbook.md step 0 stays valid.
+# uid 10001 (not distroless's 65532) so the host /data ownership in docs/deployment.md step 0 stays valid.
 USER 10001:10001
 WORKDIR /data
 EXPOSE 8787
-# Only meaningful for `serve` (healthy = /healthz 200: loop alive and recent; the probe follows LISTEN). One-shot `plan`/`apply`
-# containers never listen, so they would report unhealthy: harmless, or run them with --no-healthcheck.
+# Only meaningful for `serve`: healthy means /healthz answers 200 (loop alive and recent), and the probe follows LISTEN.
+# One-shot `plan`/`apply` containers never listen and would report unhealthy. That's harmless, or run them with
+# --no-healthcheck.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD ["pxar", "healthcheck"]
 ENTRYPOINT ["pxar"]

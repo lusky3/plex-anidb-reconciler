@@ -102,8 +102,8 @@ class Action:
     eids: tuple[int, ...]
     when: datetime | None
     reason: str
-    # An R2b whose episode counts as watched only because of an R2 planned in this same run: it may be
-    # executed only after that R2 (this Shoko file id) was applied in this run.
+    # An R2b whose episode counts as watched only because of an R2 planned in this same run: it may run
+    # only once this run has applied that R2 (this Shoko file id).
     depends_on_file_id: int | None = None
     # SETs only: the Shoko absolute path the Plex path matched exactly. The pre-write re-check fails
     # (shoko_changed) if the file no longer has it, e.g. another release replaced the file at that path.

@@ -1,7 +1,7 @@
 """SQLite ledger: audit and idempotency record of writes the reconciler attempted.
 
-Only ``applied`` and ``failed`` rows are stored; planned/skipped/capped/reported actions go to
-the per-run CSV report only, so the ledger grows with real writes, not with every poll."""
+It stores only ``applied`` and ``failed`` rows. Planned/skipped/capped/reported actions go to the
+per-run CSV report alone, so the ledger grows with real writes, not with every poll."""
 
 import json
 import sqlite3
@@ -68,7 +68,7 @@ class Ledger:
         self._db.commit()
 
     def _add_missing_columns(self) -> None:
-        """Ledgers created before the before/after audit columns existed get them added (old rows: NULL)."""
+        """Add the before/after audit columns to a ledger created before they existed (old rows: NULL)."""
         present = {row[1] for row in self._db.execute("PRAGMA table_info(actions)")}
         for column in _AUDIT_COLUMNS:
             if column not in present:
