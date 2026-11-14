@@ -51,7 +51,3 @@ class PathMatcher:
         if not cands:
             return None
         return Match(next(iter(cands.values())), rewritten if exact else None)
-
-    def match(self, plex_path: str) -> ShokoFile | Ambiguous | None:
-        found = self.lookup(plex_path)
-        return found.file if isinstance(found, Match) else found
