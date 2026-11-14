@@ -210,6 +210,9 @@ def _execute(action: Action, clients: Clients) -> Outcome:
             clients.plex.mark_played(action.rating_key)
         elif _shoko_changed(action, clients.shoko.get_file(action.file_id)):
             return Outcome(action, Status.FAILED, "shoko_changed")
+        elif clients.shoko.get_user_stats(action.file_id).watched:
+            # Shoko already has a watched date for this file: never overwrite it (not a failure)
+            return Outcome(action, Status.SKIPPED, "shoko_already_watched")
         else:
             clients.shoko.set_watched(action.file_id, action.when)
     except (ShokoError, PlexError) as exc:
@@ -219,7 +222,8 @@ def _execute(action: Action, clients: Clients) -> Outcome:
 
 class _Executor:
     """Decides each executable action's status in order, writing (apply) under the cap. Applied and
-    failed writes are committed to the ledger before the next write starts."""
+    failed writes are committed to the ledger before the next write starts; a write found unnecessary
+    at the last moment (Shoko already has a date) is only listed in the CSV."""
 
     def __init__(
         self, run_id: str, ledger: Ledger, clients: Clients, *, apply: bool, budget: int, stop: threading.Event | None
@@ -264,8 +268,10 @@ class _Executor:
         return self._set_status.get(action.depends_on_file_id) == success
 
     def _write(self, action: Action) -> Outcome:
-        self._budget -= 1
         outcome = _execute(action, self._clients)
+        if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row
+            return outcome
+        self._budget -= 1
         self.shoko_changed += outcome.detail == "shoko_changed"
         self._ledger.record(self._run_id, action, outcome.status, outcome.detail)
         return outcome

@@ -115,6 +115,7 @@ def mock_servers(*, shoko_status=200):
     scrobble = respx.get(f"{PLEX}/:/scrobble").mock(return_value=httpx.Response(200))
     put = respx.put(url__regex=rf"{SHOKO}/api/v3/File/\d+/UserStats").mock(return_value=httpx.Response(shoko_status))
     mock_file_detail([shoko_file(1, 1, 50), shoko_file(2, 2, 51), shoko_file(3, 3, 52)])
+    mock_user_stats({})
     mock_servers.index = index
     return scrobble, put
 
@@ -130,10 +131,21 @@ def mock_file_detail(files):
     return respx.get(url__regex=rf"{SHOKO}/api/v3/File/(?P<file_id>\d+)(\?.*)?$").mock(side_effect=detail)
 
 
+def mock_user_stats(stats_by_id):
+    """GET /api/v3/File/{id}/UserStats: Shoko's current watched state of one file."""
+
+    def handler(request, file_id):
+        body = stats_by_id.get(int(file_id), {"WatchedCount": 0, "LastWatchedAt": None, "ResumePosition": None})
+        return body if isinstance(body, httpx.Response) else httpx.Response(200, json=body)
+
+    return respx.get(url__regex=rf"{SHOKO}/api/v3/File/(?P<file_id>\d+)/UserStats$").mock(side_effect=handler)
+
+
 def mock_world(files, items, history=()):
     """Shoko index + per-file detail, one Plex section, owner history rows (rk, epoch)."""
     respx.get(f"{SHOKO}/api/v3/File").mock(return_value=httpx.Response(200, json={"List": files}))
     detail = mock_file_detail(files)
+    mock_user_stats({})
     respx.get(f"{PLEX}/library/sections/4/all").mock(
         return_value=httpx.Response(200, json={"MediaContainer": {"Metadata": items}})
     )
@@ -724,3 +736,61 @@ def test_corrupt_shoko_index_cache_logged_at_debug(env, caplog):
     assert "shoko index cache not used (JSONDecodeError)" in caplog.text
     assert "SHOKOSECRET" not in caplog.text
     assert mock_servers.index.call_count == 1
+
+
+# --- never overwrite a date Shoko already has (GET UserStats before every SET) ---
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        {"WatchedCount": 1, "LastWatchedAt": "2024-01-01T10:00:00-05:00", "ResumePosition": None},
+        {"WatchedCount": 0, "LastWatchedAt": "2024-01-01T10:00:00-05:00", "ResumePosition": None},
+        {"WatchedCount": 3, "LastWatchedAt": None, "ResumePosition": None},
+    ],
+    ids=["count_and_date", "date_only", "count_only"],
+)
+@respx.mock
+def test_shoko_already_watched_is_never_overwritten(env, stats):
+    _, put = mock_servers()
+    mock_user_stats({3: stats})
+    res = go(env, apply=True)
+    assert put.call_count == 0
+    assert res.counts == {"applied": 2, "skipped": 1}
+    assert set_rows(res) == [("R2", "3", "skipped", "shoko_already_watched")]
+    db = Path(env["DATA_DIR"]) / "ledger.sqlite"
+    assert _query(db, "SELECT kind FROM actions ORDER BY id") == [("mark_plex_played",), ("mark_plex_played",)]
+
+
+@respx.mock
+def test_shoko_unwatched_is_written_after_reading_user_stats(env):
+    _, put = mock_servers()
+    stats = mock_user_stats({})
+    res = go(env, apply=True)
+    assert res.counts == {"applied": 3}
+    assert put.call_count == 1 and stats.call_count == 1
+    paths = [c.request.url.path for c in respx.calls if "/api/v3/File/3" in c.request.url.path]
+    assert paths[-2:] == ["/api/v3/File/3/UserStats", "/api/v3/File/3/UserStats"]
+    assert [c.request.method for c in respx.calls if c.request.url.path == "/api/v3/File/3/UserStats"] == [
+        "GET",
+        "PUT",
+    ]
+
+
+@respx.mock
+def test_malformed_user_stats_fails_without_write(env):
+    _, put = mock_servers()
+    mock_user_stats({3: httpx.Response(200, json={"WatchedCount": "lots"})})
+    res = go(env, apply=True)
+    assert put.call_count == 0
+    assert res.counts == {"applied": 2, "failed": 1}
+    rows = set_rows(res)
+    assert rows[0][:3] == ("R2", "3", "failed") and "unexpected body" in rows[0][3]
+
+
+@respx.mock
+def test_dry_run_does_not_read_user_stats(env):
+    mock_servers()
+    stats = mock_user_stats({})
+    go(env, apply=False)
+    assert stats.call_count == 0

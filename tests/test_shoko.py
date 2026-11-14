@@ -181,3 +181,58 @@ def test_to_shoko_time_across_dst_transitions(utc, expected):
     stamp = to_shoko_time(utc, NY)
     assert stamp == expected
     assert datetime.fromisoformat(stamp) == utc  # same instant
+
+
+# --- read watched state (never-overwrite guard) ---
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body,count,last",
+    [
+        (
+            {"WatchedCount": 2, "LastWatchedAt": "2023-03-01T21:00:00-05:00", "ResumePosition": None},
+            2,
+            datetime(2023, 3, 2, 2, tzinfo=UTC),
+        ),
+        ({"WatchedCount": 0, "LastWatchedAt": None, "ResumePosition": None}, 0, None),
+        ({"WatchedCount": 0, "LastWatchedAt": "2023-03-01T21:00:00"}, 0, datetime(2023, 3, 2, 2, tzinfo=UTC)),
+    ],
+    ids=["watched", "unwatched", "naive_date_is_shoko_tz"],
+)
+def test_get_user_stats_parses(body, count, last):
+    route = respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=httpx.Response(200, json=body))
+    stats = make_client().get_user_stats(7)
+    assert (stats.watched_count, stats.last_watched_at) == (count, last)
+    assert stats.watched is (count > 0 or last is not None)
+    assert route.calls.last.request.headers["apikey"] == "SECRETKEY"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="nope"),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"LastWatchedAt": None}),
+        httpx.Response(200, json={"WatchedCount": "1", "LastWatchedAt": None}),
+        httpx.Response(200, json={"WatchedCount": True, "LastWatchedAt": None}),
+        httpx.Response(200, json={"WatchedCount": -1, "LastWatchedAt": None}),
+        httpx.Response(200, json={"WatchedCount": 0}),
+        httpx.Response(200, json={"WatchedCount": 0, "LastWatchedAt": "yesterday"}),
+        httpx.Response(200, json={"WatchedCount": 0, "LastWatchedAt": 5}),
+    ],
+    ids=["non_json", "list", "no_count", "str_count", "bool_count", "neg_count", "no_date", "bad_date", "int_date"],
+)
+def test_get_user_stats_malformed_raises_shoko_error(response):
+    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=response)
+    with pytest.raises(ShokoError, match="unexpected body") as exc:
+        make_client().get_user_stats(7)
+    assert "SECRETKEY" not in str(exc.value)
+
+
+@respx.mock
+def test_get_user_stats_http_error_raises():
+    respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=httpx.Response(404))
+    with pytest.raises(ShokoError):
+        make_client().get_user_stats(7)

@@ -17,6 +17,11 @@ R2, and every R2 before any R2b, so a canary write to AniDB is `pxar apply --rul
 that relies on an R2 planned in the same run is only executed once that R2 was applied in this run;
 otherwise it is listed as `skipped` (`detail` column: `prerequisite_not_applied`) and reconsidered next run.
 
+Right before each Shoko write the reconciler re-reads the file (`GET /api/v3/File/{id}`: same fid, episodes
+and path, else `failed`/`shoko_changed`) and its watched state (`GET /api/v3/File/{id}/UserStats`). If Shoko
+already has a `LastWatchedAt` or a non-zero `WatchedCount` for that file, nothing is written: the row is
+`skipped` with detail `shoko_already_watched` (an existing date is never overwritten; not a failure, no ledger row).
+
 ## Docker
 
 Images are published to `ghcr.io/lusky3/plex-anidb-reconciler` (`latest` and `sha-<commit>` from `main`, also rebuilt weekly; `X.Y.Z`/`X.Y` and `sha-<commit>` from `vX.Y.Z` tags; `latest` never moves on a release tag) with SBOM and provenance attestations; inspect them with `docker buildx imagetools inspect ghcr.io/lusky3/plex-anidb-reconciler:latest --format '{{ json .SBOM }}'`. Local build: `docker build -t pxar .`. The image runs `pxar serve` by default.

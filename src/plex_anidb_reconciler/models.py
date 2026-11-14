@@ -25,6 +25,18 @@ class ShokoFile:
 
 
 @dataclass(frozen=True)
+class ShokoUserStats:
+    """Shoko's current watched state of one file (GET /api/v3/File/{id}/UserStats)."""
+
+    watched_count: int
+    last_watched_at: datetime | None
+
+    @property
+    def watched(self) -> bool:
+        return self.last_watched_at is not None or self.watched_count > 0
+
+
+@dataclass(frozen=True)
 class PlexItem:
     rating_key: str
     section: int

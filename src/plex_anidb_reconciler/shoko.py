@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from plex_anidb_reconciler.models import ShokoFile
+from plex_anidb_reconciler.models import ShokoFile, ShokoUserStats
 
 
 class ShokoError(Exception):
@@ -42,6 +42,22 @@ def _parse_created(value: object, tz: ZoneInfo) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=tz)
+
+
+def _parse_user_stats(raw: object, tz: ZoneInfo) -> ShokoUserStats:
+    """Strict: anything unexpected raises, so the caller fails closed instead of writing."""
+    if not isinstance(raw, dict):
+        raise TypeError("user stats is not an object")
+    count = raw["WatchedCount"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("WatchedCount is not a non-negative integer")
+    last = raw["LastWatchedAt"]
+    if last is None:
+        return ShokoUserStats(count, None)
+    if not isinstance(last, str):
+        raise TypeError("LastWatchedAt is not a string")
+    parsed = datetime.fromisoformat(last)
+    return ShokoUserStats(count, parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=tz))
 
 
 def _parse_file(raw: dict, tz: ZoneInfo) -> ShokoFile:
@@ -108,6 +124,15 @@ class ShokoClient:
             return _parse_file(resp.json(), self.tz)
         except PARSE_ERRORS as exc:
             raise _bad_body(f"/api/v3/File/{file_id}", exc) from None
+
+    def get_user_stats(self, file_id: int) -> ShokoUserStats:
+        """Shoko's current watched state of one file (read-only), checked right before a write."""
+        path = f"/api/v3/File/{file_id}/UserStats"
+        resp = self._request("GET", path)
+        try:
+            return _parse_user_stats(resp.json(), self.tz)
+        except PARSE_ERRORS as exc:
+            raise _bad_body(path, exc) from None
 
     def set_watched(self, file_id: int, when: datetime) -> None:
         stamp = to_shoko_time(when, self.tz)
