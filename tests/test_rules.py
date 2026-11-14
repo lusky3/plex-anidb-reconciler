@@ -12,14 +12,15 @@ T1 = datetime(2026, 1, 1, tzinfo=UTC)
 T2 = datetime(2026, 2, 1, tzinfo=UTC)
 T3 = datetime(2026, 3, 1, tzinfo=UTC)
 T2025 = datetime(2025, 6, 1, tzinfo=UTC)
+T0 = datetime(2025, 1, 1, tzinfo=UTC)  # default Shoko import time (before every playback)
 
 
 def entry(fid, eid, when):
     return MyListEntry(fid=fid, eid=eid, aid=1, viewed_at=when, state=1)
 
 
-def shoko(file_id, fid, eids, path, manual=False):
-    return ShokoFile(file_id, fid, tuple(eids), manual, (path,))
+def shoko(file_id, fid, eids, path, manual=False, created=T0):
+    return ShokoFile(file_id, fid, tuple(eids), manual, (path,), created)
 
 
 def item(rk, *paths, views=1, last=None, section=4):
@@ -53,6 +54,9 @@ def simple(**kw):
     """One Plex item (rk 'a') backed by file 1 (fid 12345, eid 50)."""
     base = {"items": [item("a", "/p/x.mkv", last=T2)], "files": [shoko(1, 12345, [50], "/p/x.mkv")]}
     base.update(kw)
+    if not kw.get("no_snapshot_row"):
+        base["entries"] = [entry(12345, 50, None), *base.get("entries", [])]
+    base.pop("no_snapshot_row", None)
     return Scenario(**base)
 
 
@@ -143,9 +147,10 @@ def s_multi_partial_unwatched():
 
 def s_two_libraries():
     return Scenario(
-        items=[item("b", "/p2/x.mkv", section=5, last=T3), item("a", "/p/x.mkv", last=T2)],
-        files=[ShokoFile(1, 12345, (50,), False, ("/p/x.mkv", "/p2/x.mkv"))],
-        history={"a": [T2], "b": [T1]},
+        items=[item("a", "/p/x.mkv", last=T2), item("b", "/p2/x.mkv", section=5, last=T3)],
+        files=[ShokoFile(1, 12345, (50,), False, ("/p/x.mkv", "/p2/x.mkv"), T0)],
+        entries=[entry(12345, 50, None)],
+        history={"a": [T3], "b": [T1]},
     )
 
 
@@ -157,8 +162,50 @@ def s_two_paths_one_item():
     return simple(
         items=[item("a", "/p/x.mkv", "/p/y.mkv")],
         files=[shoko(1, 12345, [50], "/p/x.mkv"), shoko(2, 777, [60], "/p/y.mkv")],
+        entries=[entry(12345, 50, None), entry(777, 60, None)],
         history={"a": [T1]},
     )
+
+
+def s_same_fid_replayed():
+    return simple(entries=[entry(12345, 50, T1)], history={"a": [T3]})
+
+
+def s_multi_version():
+    return simple(
+        items=[item("a", "/p/x.mkv", "/p/x2.mkv")],
+        files=[shoko(1, 12345, [50], "/p/x.mkv"), shoko(2, 777, [50], "/p/x2.mkv")],
+        entries=[entry(12345, 50, None), entry(777, 50, None)],
+        history={"a": [T2]},
+    )
+
+
+def s_multi_version_unwatched():
+    return simple(
+        items=[item("a", "/p/x.mkv", "/p/x2.mkv", views=0)],
+        files=[shoko(1, 12345, [50], "/p/x.mkv"), shoko(2, 777, [50], "/p/x2.mkv")],
+        entries=[entry(999, 50, T1)],
+    )
+
+
+def s_not_in_snapshot():
+    return simple(no_snapshot_row=True, entries=[entry(999, 50, T1)], history={"a": [T3]})
+
+
+def s_unknown_file_age():
+    return simple(
+        files=[shoko(1, 12345, [50], "/p/x.mkv", created=None)], entries=[entry(999, 50, T1)], history={"a": [T3]}
+    )
+
+
+def s_r2b_play_before_created():
+    return simple(
+        files=[shoko(1, 12345, [50], "/p/x.mkv", created=T3)], entries=[entry(999, 50, T1)], history={"a": [T2]}
+    )
+
+
+def s_r2b_play_equals_cutoff():
+    return simple(entries=[entry(999, 50, T2)], history={"a": [T2]})
 
 
 SCENARIOS = [
@@ -182,6 +229,13 @@ SCENARIOS = [
     s_two_libraries,
     s_r1_already_fid_watched,
     s_two_paths_one_item,
+    s_same_fid_replayed,
+    s_multi_version,
+    s_multi_version_unwatched,
+    s_not_in_snapshot,
+    s_unknown_file_age,
+    s_r2b_play_before_created,
+    s_r2b_play_equals_cutoff,
 ]
 
 
@@ -295,18 +349,17 @@ def test_multi_episode_partial_reports():
 
 def test_file_with_no_episodes_is_never_marked_played():
     sc = simple(items=[item("a", "/p/x.mkv", views=0)], files=[shoko(1, 12345, [], "/p/x.mkv")])
-    acts = sc.run()
-    assert [a.kind for a in acts] == [ActionKind.REPORT]
+    assert reports(sc.run()) == [("R4", "no_episodes")]
 
 
 def test_same_file_two_libraries_one_write_earliest_date():
     acts = s_two_libraries().run()
     (a,) = sets(acts)
-    assert (a.file_id, a.when, a.rating_key) == (1, T1, "b")
+    assert (a.file_id, a.when, a.rating_key) == (1, T1, "b")  # earliest item is not first in input
     assert len(acts) == 1
 
 
-def test_fid_already_watched_skips_and_r1_not_needed_when_plex_unwatched_but_fid_watched():
+def test_plex_unwatched_with_fid_watched_on_anidb_marks_plex_played():
     acts = s_r1_already_fid_watched().run()
     assert [(a.kind, a.rule) for a in acts] == [(ActionKind.MARK_PLEX_PLAYED, "R1")]
 
@@ -317,7 +370,7 @@ def test_output_sorted_by_rating_key_then_file_id():
     mixed = Scenario(
         items=[item("b", "/p/y.mkv", views=0), item("a", "/p/x.mkv", last=T2)],
         files=[shoko(1, 12345, [50], "/p/x.mkv"), shoko(2, 777, [60], "/p/y.mkv")],
-        entries=[entry(1, 60, T1)],
+        entries=[entry(12345, 50, None), entry(1, 60, T1)],
     )
     assert [a.rating_key for a in mixed.run()] == ["a", "b"]
 
@@ -330,6 +383,44 @@ def test_never_emits_unwatch(builder):
         assert a.kind in {ActionKind.MARK_PLEX_PLAYED, ActionKind.SET_FILE_WATCHED, ActionKind.REPORT}
         if a.kind is ActionKind.SET_FILE_WATCHED:
             assert not ml.fid_watched(a.fid)
+
+
+def test_same_fid_replayed_no_write():
+    assert s_same_fid_replayed().run() == []
+
+
+def test_multi_version_reports_each_file_and_never_sets():
+    acts = s_multi_version().run()
+    assert sets(acts) == []
+    assert [(a.rule, a.reason, a.file_id) for a in acts] == [("R4", "multi_version", 1), ("R4", "multi_version", 2)]
+
+
+def test_multi_version_unwatched_still_allows_r1():
+    assert [(a.kind, a.rule) for a in s_multi_version_unwatched().run()] == [(ActionKind.MARK_PLEX_PLAYED, "R1")]
+
+
+def test_not_in_snapshot_reports_no_write():
+    acts = s_not_in_snapshot().run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "not_in_snapshot")]
+
+
+def test_unknown_file_age_blocks_r2b():
+    acts = s_unknown_file_age().run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R2b", "unknown_file_age")]
+
+
+def test_r2b_play_before_file_created_excluded():
+    acts = s_r2b_play_before_created().run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R2b", "no_playback")]
+
+
+def test_r2b_play_equal_to_cutoff_excluded():
+    acts = s_r2b_play_equals_cutoff().run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R2b", "no_playback")]
 
 
 def test_scenarios_cover_all_action_kinds():

@@ -18,7 +18,17 @@ def to_shoko_time(when: datetime, tz: ZoneInfo) -> str:
     return when.replace(microsecond=0).astimezone(tz).isoformat()
 
 
-def _parse_file(raw: dict) -> ShokoFile:
+def _parse_created(value: object, tz: ZoneInfo) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=tz)
+
+
+def _parse_file(raw: dict, tz: ZoneInfo) -> ShokoFile:
     eids: list[int] = []
     manual = False
     for series in raw.get("SeriesIDs") or []:
@@ -36,6 +46,7 @@ def _parse_file(raw: dict) -> ShokoFile:
         eids=tuple(eids),
         manual_link=manual,
         abs_paths=paths,
+        created_at=_parse_created(raw.get("Created"), tz),
     )
 
 
@@ -59,7 +70,7 @@ class ShokoClient:
         params = {"pageSize": "0", "include": "XRefs,AbsolutePaths", "includeDataFrom": "AniDB"}
         data = self._request("GET", "/api/v3/File", params=params).json()
         items = data["List"] if isinstance(data, dict) else data
-        return [_parse_file(item) for item in items]
+        return [_parse_file(item, self.tz) for item in items]
 
     def set_watched(self, file_id: int, when: datetime) -> None:
         stamp = to_shoko_time(when, self.tz)

@@ -21,6 +21,7 @@ class ShokoFile:
     eids: tuple[int, ...]
     manual_link: bool
     abs_paths: tuple[str, ...]
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True)

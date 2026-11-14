@@ -79,3 +79,29 @@ def test_list_files_error_raises():
 def test_to_shoko_time_rejects_naive():
     with pytest.raises(ValueError):
         to_shoko_time(datetime(2023, 1, 1), NY)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "created,expected",
+    [
+        ("2023-05-01T20:00:00-04:00", datetime(2023, 5, 2, 0, 0, tzinfo=UTC)),
+        ("2023-05-01T20:00:00", datetime(2023, 5, 2, 0, 0, tzinfo=UTC)),  # naive -> America/New_York
+        (None, None),
+    ],
+)
+def test_created_parsing(created, expected):
+    raw = {"ID": 9, "AniDB": {"ID": 1}, "Locations": []}
+    if created is not None:
+        raw["Created"] = created
+    respx.get(f"{BASE}/api/v3/File").mock(return_value=httpx.Response(200, json={"List": [raw]}))
+    (f,) = make_client().list_files()
+    assert f.created_at == expected
+    if expected is not None:
+        assert f.created_at.tzinfo is not None
+
+
+@respx.mock
+def test_created_missing_key_is_none():
+    respx.get(f"{BASE}/api/v3/File").mock(return_value=httpx.Response(200, json={"List": [{"ID": 9}]}))
+    assert make_client().list_files()[0].created_at is None

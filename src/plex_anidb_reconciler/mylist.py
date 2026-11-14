@@ -64,14 +64,20 @@ def snapshot_age(path: Path, now: datetime) -> timedelta:
 class MyListIndex:
     def __init__(self, entries: Iterable[MyListEntry]) -> None:
         self._watched_fids: set[int] = set()
+        self._all_fids: set[int] = set()
         self._views: dict[int, list[datetime]] = defaultdict(list)
         for entry in entries:
+            if entry.fid:
+                self._all_fids.add(entry.fid)
             if entry.viewed_at is None:
                 continue
             if entry.fid:
                 self._watched_fids.add(entry.fid)
             if entry.eid is not None:
                 self._views[entry.eid].append(entry.viewed_at)
+
+    def has_fid(self, fid: int | None) -> bool:
+        return bool(fid) and fid in self._all_fids
 
     def fid_watched(self, fid: int | None) -> bool:
         return bool(fid) and fid in self._watched_fids

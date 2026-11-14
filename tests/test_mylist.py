@@ -91,3 +91,17 @@ def test_non_utf8_raises_snapshot_error(tmp_path):
     p.write_bytes(b"\xff\xfe[\x80")
     with pytest.raises(SnapshotError, match="bad.json"):
         load_mylist(p)
+
+
+def test_has_fid_counts_unwatched_entries():
+    from plex_anidb_reconciler.models import MyListEntry
+
+    ml = MyListIndex(
+        [
+            MyListEntry(fid=5, eid=1, aid=1, viewed_at=None, state=1),
+            MyListEntry(fid=6, eid=2, aid=1, viewed_at=datetime(2023, 1, 1, tzinfo=UTC), state=1),
+        ]
+    )
+    assert ml.has_fid(5) and ml.has_fid(6)
+    assert not ml.fid_watched(5) and ml.fid_watched(6)
+    assert not ml.has_fid(7) and not ml.has_fid(None) and not ml.has_fid(0)

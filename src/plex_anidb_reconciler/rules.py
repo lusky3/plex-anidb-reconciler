@@ -39,10 +39,12 @@ def _plan_item(
     if any(isinstance(m, Ambiguous) for m in matches):
         return [_report("R4", "ambiguous_path", rk)]
     files: list[ShokoFile] = [m for m in matches if isinstance(m, ShokoFile)]
-    if not files or any(f.fid is None or not f.eids for f in files):
+    if not files or any(f.fid is None for f in files):
         return [_report("R4", "unrecognised", rk)]
     if any(f.manual_link for f in files):
         return [_report("R4", "manual_link", rk)]
+    if any(not f.eids for f in files):
+        return [_report("R4", "no_episodes", rk)]
 
     watched = mylist.watched_eids()
     eids = tuple(sorted({e for f in files for e in f.eids}))
@@ -54,10 +56,17 @@ def _plan_item(
             return [_report("R4", "partial_episode", rk)]
         return []
 
+    distinct = {f.file_id: f for f in files}
+    if len(distinct) > 1:
+        return [_report("R4", "multi_version", rk, f) for f in distinct.values()]
+
     out: list[Action] = []
     plays_all = history.get(rk) or []
     for f in files:
         if mylist.fid_watched(f.fid):
+            continue
+        if not mylist.has_fid(f.fid):
+            out.append(_report("R4", "not_in_snapshot", rk, f))
             continue
         watched_f = [e for e in f.eids if e in watched]
         if not watched_f:
@@ -72,7 +81,10 @@ def _plan_item(
             out.append(_report("R4", "partial_episode", rk, f))
         else:
             cutoff = mylist.max_watch(f.eids)
-            plays = [t for t in plays_all if cutoff is not None and t > cutoff]
+            if f.created_at is None:
+                out.append(_report("R2b", "unknown_file_age", rk, f))
+                continue
+            plays = [t for t in plays_all if cutoff is not None and t > cutoff and t > f.created_at]
             if r2b_policy == "record" and plays and snapshot_fresh:
                 out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays)))
             elif r2b_policy != "record":
