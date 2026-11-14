@@ -8,16 +8,18 @@ process is not coordinated with this lock.
 import json
 import logging
 import signal
+import socket
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.config import Settings, parse_listen
 from plex_anidb_reconciler.runner import run_once
 
 log = logging.getLogger(__name__)
-MAX_BODY = 64 * 1024
+MAX_BODY = 1024 * 1024  # larger bodies get 413 and the connection is closed
+CHUNK = 64 * 1024
 
 
 class Service:
@@ -34,13 +36,30 @@ class Service:
         self._event = threading.Event()  # pending-run flag; coalesces triggers
         self._state: dict = {"last_run_id": None, "last_status": None, "last_finished": None, "snapshot": None}
         self._state_lock = threading.Lock()
+        self._heartbeat: datetime | None = None  # last loop iteration or finished run
+        self._loop_thread: threading.Thread | None = None
+
+    def _beat(self) -> None:
+        with self._state_lock:
+            self._heartbeat = self._clock()
+
+    def healthy(self) -> bool:
+        """The loop thread is alive and has beaten within 2 x POLL_MINUTES + 5 min."""
+        with self._state_lock:
+            beat = self._heartbeat
+            thread = self._loop_thread
+        if thread is None or not thread.is_alive() or beat is None:
+            return False
+        limit = timedelta(minutes=2 * self.settings.poll_minutes + 5)
+        return self._clock() - beat <= limit
 
     def request_run(self) -> None:
         self._event.set()
 
     def health(self) -> dict:
+        loop = "ok" if self.healthy() else "stale"
         with self._state_lock:
-            return dict(self._state)
+            return {**self._state, "loop": loop}
 
     def run_pending_now(self) -> None:
         """Run one reconcile (blocking if one is in flight). Never raises."""
@@ -61,10 +80,14 @@ class Service:
                     self._state["snapshot"] = snapshot  # ok | stale | unavailable
                 self._state["last_status"] = status
                 self._state["last_finished"] = self._clock().isoformat()
+                self._heartbeat = self._clock()
 
     def loop(self, stop: threading.Event) -> None:
         interval = max(self.settings.poll_minutes, 1) * 60
+        with self._state_lock:
+            self._loop_thread = threading.current_thread()
         while not stop.is_set():
+            self._beat()
             self._event.wait(timeout=interval)  # a trigger wakes this immediately
             if stop.is_set():
                 break
@@ -76,27 +99,48 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         timeout = 10  # a stalled client cannot pin a handler thread
 
-        def _json(self, code: int, body: dict) -> None:
+        def _json(self, code: int, body: dict, close: bool = False) -> None:
             data = json.dumps(body).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if close:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self) -> None:
             if self.path == "/healthz":
-                self._json(200, service.health())
+                body = service.health()
+                self._json(200 if body["loop"] == "ok" else 503, body)
             else:
                 self._json(404, {"error": "not found"})
 
+        def _drain_body(self) -> bool:
+            """Read and discard the whole request body (Tautulli payload). False: response already sent."""
+            raw = self.headers.get("Content-Length")
+            if raw is None:
+                return True
+            raw = raw.strip()
+            if not raw.isdigit():  # also rejects negative and empty values
+                self._json(400, {"error": "bad Content-Length"}, close=True)
+                return False
+            remaining = int(raw)
+            if remaining > MAX_BODY:
+                self._json(413, {"error": "body too large"}, close=True)
+                return False
+            while remaining > 0:
+                chunk = self.rfile.read(min(CHUNK, remaining))
+                if not chunk:
+                    self.close_connection = True
+                    return False
+                remaining -= len(chunk)
+            return True
+
         def do_POST(self) -> None:
-            try:
-                length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
-            except ValueError:
-                length = 0
-            if length > 0:
-                self.rfile.read(length)  # discard Tautulli payload
+            if not self._drain_body():
+                return
             if self.path == "/trigger":
                 service.request_run()
                 self._json(202, {"status": "accepted"})
@@ -106,18 +150,34 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
         def log_message(self, format: str, *args) -> None:
             pass
 
-    return ThreadingHTTPServer((host, port), Handler)
+    server_cls = ThreadingHTTPServer
+    if ":" in host:  # IPv6 literal (LISTEN=[addr]:port)
+
+        class V6Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        server_cls = V6Server
+    return server_cls((host, port), Handler)
+
+
+def finish_shutdown(loop: threading.Thread, grace_s: float) -> bool:
+    """Give an in-flight run up to grace_s to finish. False (and a warning) if it is still running."""
+    loop.join(timeout=grace_s)
+    if loop.is_alive():
+        log.warning("reconcile run still running after %ss shutdown grace; exiting anyway", grace_s)
+        return False
+    return True
 
 
 def serve(settings: Settings) -> None:
-    host, _, port = settings.listen.rpartition(":")
+    host, port = parse_listen(settings.listen)
     service = Service(settings)
-    server = make_server(service, host or "0.0.0.0", int(port))
+    server = make_server(service, host, port)
     stop = threading.Event()
 
     def shutdown(signum, frame) -> None:
         stop.set()
-        service.request_run()  # wake the loop
+        service.request_run()  # wake the loop; it exits after an in-flight run completes
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -127,5 +187,5 @@ def serve(settings: Settings) -> None:
     loop.start()
     log.info("serving on %s", settings.listen)
     server.serve_forever()
-    loop.join(timeout=10)
+    finish_shutdown(loop, settings.shutdown_grace_s)
     server.server_close()
