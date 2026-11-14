@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from plex_anidb_reconciler.models import ActionKind, MyListEntry, PlexItem, ShokoFile
+from plex_anidb_reconciler.models import ActionKind, MyListEntry, PendingWatch, PlexItem, ShokoFile
 from plex_anidb_reconciler.mylist import MyListIndex
 from plex_anidb_reconciler.paths import PathMatcher
 from plex_anidb_reconciler.rules import plan
@@ -426,3 +426,66 @@ def test_r2b_play_equal_to_cutoff_excluded():
 def test_scenarios_cover_all_action_kinds():
     kinds = {a.kind for b in SCENARIOS for a in b().run()}
     assert kinds == set(ActionKind)
+
+
+# --- C1 (ruling 15): R1-marked items never use lastViewedAt as an AniDB date ---
+
+
+def test_r1_marked_item_without_history_reports_not_sets():
+    sc = simple(items=[item("a", "/p/x.mkv", last=T3)])
+    acts = plan(sc.items, {}, PathMatcher(sc.files, []), sc.mylist(), "record", True, r1_marked=frozenset({"a"}))
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "plex_marked_by_reconciler")]
+
+
+def test_r1_marked_item_with_history_uses_history_only():
+    sc = simple(items=[item("a", "/p/x.mkv", last=T3)], history={"a": [T2]})
+    acts = plan(
+        sc.items, sc.history, PathMatcher(sc.files, []), sc.mylist(), "record", True, r1_marked=frozenset({"a"})
+    )
+    (a,) = sets(acts)
+    assert (a.rule, a.when) == ("R2", T2)
+
+
+# --- I1 (ruling 16): applied SETs not yet in the snapshot count as watched ---
+
+
+def test_pending_fid_is_treated_as_watched():
+    sc = s_new_watch()
+    pending = [PendingWatch(file_id=1, fid=12345, eids=(50,), when=T1)]
+    assert plan(sc.items, sc.history, PathMatcher(sc.files, []), sc.mylist(), "record", True, pending=pending) == []
+
+
+def test_pending_eid_gates_new_file_through_r2b():
+    # file 2 (fid 777) replaced file 1 for the same episode; file 1's SET (T1) is applied but not in the snapshot yet
+    sc = simple(
+        items=[item("a", "/p/x2.mkv", last=T2)],
+        files=[shoko(2, 777, [50], "/p/x2.mkv")],
+        entries=[entry(777, 50, None)],
+        history={"a": [T1]},
+    )
+    pending = [PendingWatch(file_id=1, fid=12345, eids=(50,), when=T1)]
+    acts = plan(sc.items, sc.history, PathMatcher(sc.files, []), sc.mylist(), "record", True, pending=pending)
+    assert sets(acts) == []
+    assert reports(acts) == [("R2b", "no_playback")]
+    # a real play after the pending date is a legitimate R2b
+    sc.history = {"a": [T1, T3]}
+    acts = plan(sc.items, sc.history, PathMatcher(sc.files, []), sc.mylist(), "record", True, pending=pending)
+    (a,) = sets(acts)
+    assert (a.rule, a.file_id, a.when) == ("R2b", 2, T3)
+
+
+def test_two_fids_same_episode_one_run_only_one_r2():
+    sc = Scenario(
+        items=[item("a", "/p/x.mkv", last=T2), item("b", "/p2/y.mkv", section=5, last=T1)],
+        files=[shoko(1, 11, [50], "/p/x.mkv"), shoko(2, 22, [50], "/p2/y.mkv")],
+        entries=[entry(11, 50, None), entry(22, 50, None)],
+        history={"a": [T2], "b": [T1]},
+    )
+    acts = sc.run()
+    assert [(a.rule, a.file_id, a.when) for a in sets(acts)] == [("R2b", 1, T2), ("R2", 2, T1)]
+    # without a real play after the first file's date, the second file is not written
+    sc.history = {"b": [T1]}
+    acts = sc.run()
+    assert [(a.rule, a.file_id) for a in sets(acts)] == [("R2", 2)]
+    assert reports(acts) == [("R2b", "no_playback")]

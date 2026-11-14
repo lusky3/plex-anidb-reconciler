@@ -49,3 +49,13 @@ class Action:
     eids: tuple[int, ...]
     when: datetime | None
     reason: str
+
+
+@dataclass(frozen=True)
+class PendingWatch:
+    """A watch the reconciler wrote (or is about to write) that the MyList snapshot may not show yet."""
+
+    file_id: int
+    fid: int | None
+    eids: tuple[int, ...]
+    when: datetime
