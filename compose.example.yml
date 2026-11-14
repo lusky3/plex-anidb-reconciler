@@ -21,8 +21,8 @@ services:
     # No published ports: /trigger is unauthenticated. Tautulli reaches :8787 over the shared network.
     networks:
       - media
-    # <shoko-data> and <state-dir> in docs/deployment.md. /data must be owned by uid 10001;
-    # /mylist must be readable by it.
+    # <shoko-data> and <state-dir> are explained in docs/deployment.md. uid 10001 has to own /data
+    # and be able to read /mylist.
     volumes:
       - /path/to/shoko-data/MyList:/mylist:ro
       - /path/to/state-dir:/data

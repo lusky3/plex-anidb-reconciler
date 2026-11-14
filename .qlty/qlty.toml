@@ -1,4 +1,4 @@
-# Minimal qlty config: plugins are enabled by qlty.sh (or `qlty init` locally). This file only
+# Minimal qlty config: qlty.sh (or `qlty init` locally) enables the plugins, so this file only
 # carries repo-specific overrides.
 config_version = "0"
 
