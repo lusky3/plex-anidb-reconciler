@@ -7,16 +7,18 @@ Status: work in progress. Dry-run by default; writes only with `--apply`.
 ## Usage
 
 ```
-pxar plan  [--rules R1,R2,R2b] [--file-id N]             # dry run (uncapped), writes a CSV report
+pxar plan  [--rules R1,R2,R2b] [--file-id N]             # dry run (uncapped), writes a CSV/HTML report
 pxar apply [--rules R1,R2,R2b] [--file-id N] [--limit N] # apply changes (capped by MAX_WRITES)
 pxar serve                                                # periodic runs plus POST /trigger on LISTEN
 ```
 
-Each run writes `reports/<run_id>.csv` under `DATA_DIR` with one row per action: `rule, kind, status,
+Each run writes `reports/<run_id>.csv` and a self-contained `reports/<run_id>.html` (summary counts, then the
+same rows; the newest 200 of each are kept) under `DATA_DIR`, one row per action: `rule, kind, status,
 rating_key, file_id, fid, eids, when, reason, detail, aid, release_group, anidb_state, anidb_viewdate`.
 `aid` and `release_group` come from Shoko (`aid` falls back to the MyList snapshot); `anidb_state` (MyList
 `State`: 1 HDD, 2 disk, 3 deleted, 4 remote) and `anidb_viewdate` (UTC, empty if unwatched) are what the
-snapshot says about the row's fid, empty when the fid is not in it.
+snapshot says about the row's fid, empty when the fid is not in it. `ledger.sqlite` keeps every applied
+or failed write with `before`/`after` JSON for audit.
 
 `--rules` and `--file-id` restrict which writes run; reports are always listed. `apply` runs R1 before
 R2, and every R2 before any R2b, so a canary write to AniDB is `pxar apply --rules R2 --limit 1`. An R2b

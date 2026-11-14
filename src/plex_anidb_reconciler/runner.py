@@ -7,14 +7,14 @@ import uuid
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 
 from plex_anidb_reconciler.config import Settings
-from plex_anidb_reconciler.ledger import Ledger
+from plex_anidb_reconciler.ledger import Ledger, iso_utc
 from plex_anidb_reconciler.models import (
     Action,
     ActionKind,
@@ -22,13 +22,21 @@ from plex_anidb_reconciler.models import (
     PlexItem,
     Rule,
     ShokoFile,
+    ShokoUserStats,
     SnapshotState,
     Status,
 )
 from plex_anidb_reconciler.mylist import MyListIndex, SnapshotError, load_mylist, snapshot_age, snapshot_is_fresh
 from plex_anidb_reconciler.paths import PathMatcher
 from plex_anidb_reconciler.plex import PlexClient, PlexError
-from plex_anidb_reconciler.report import prune_reports, summarize, write_report
+from plex_anidb_reconciler.report import (
+    FileStateLookup,
+    no_file_state,
+    prune_reports,
+    summarize,
+    write_html_report,
+    write_report,
+)
 from plex_anidb_reconciler.rules import plan
 from plex_anidb_reconciler.shoko import ShokoClient, ShokoError
 
@@ -201,26 +209,46 @@ def _shoko_changed(action: Action, current: ShokoFile) -> bool:
     )
 
 
-def _execute(action: Action, clients: Clients) -> Outcome:
-    """Perform one write. Raises ValueError for an action the planner can never produce."""
-    if action.kind is ActionKind.MARK_PLEX_PLAYED:
-        if action.rating_key is None:
-            raise ValueError("R1 action without rating_key")
-    elif action.kind is not ActionKind.SET_FILE_WATCHED or action.file_id is None or action.when is None:
-        raise ValueError("not an executable action")
+def _shoko_audit(stats: ShokoUserStats | None) -> dict[str, object]:
+    """Shoko's watched state read right before the write (None: not read)."""
+    return {
+        "shoko_last_watched_at": (iso_utc(stats.last_watched_at) or None) if stats else None,
+        "shoko_watched_count": stats.watched_count if stats else None,
+    }
+
+
+def _mark_played(action: Action, clients: Clients) -> Outcome:
+    before = _shoko_audit(None)
     try:
-        if action.kind is ActionKind.MARK_PLEX_PLAYED:
-            clients.plex.mark_played(action.rating_key)
-        elif _shoko_changed(action, clients.shoko.get_file(action.file_id)):
-            return Outcome(action, Status.FAILED, "shoko_changed")
-        elif clients.shoko.get_user_stats(action.file_id).watched:
+        clients.plex.mark_played(action.rating_key)
+    except PlexError as exc:
+        return Outcome(action, Status.FAILED, str(exc), before=before)
+    return Outcome(action, Status.APPLIED, before=before, after={"plex_played": True})
+
+
+def _set_watched(action: Action, clients: Clients, file_id: int, when: datetime) -> Outcome:
+    stats: ShokoUserStats | None = None
+    try:
+        if _shoko_changed(action, clients.shoko.get_file(file_id)):
+            return Outcome(action, Status.FAILED, "shoko_changed", before=_shoko_audit(None))
+        stats = clients.shoko.get_user_stats(file_id)
+        if stats.watched:
             # Shoko already has a watched date for this file: never overwrite it (not a failure)
             return Outcome(action, Status.SKIPPED, "shoko_already_watched")
-        else:
-            clients.shoko.set_watched(action.file_id, action.when)
-    except (ShokoError, PlexError) as exc:
-        return Outcome(action, Status.FAILED, str(exc))
-    return Outcome(action, Status.APPLIED)
+        clients.shoko.set_watched(file_id, when)
+    except ShokoError as exc:
+        return Outcome(action, Status.FAILED, str(exc), before=_shoko_audit(stats))
+    written = {"shoko_last_watched_at": iso_utc(when.replace(microsecond=0))}  # Shoko gets whole seconds
+    return Outcome(action, Status.APPLIED, before=_shoko_audit(stats), after=written)
+
+
+def _execute(action: Action, clients: Clients) -> Outcome:
+    """Perform one write. Raises ValueError for an action the planner can never produce."""
+    if action.kind is ActionKind.MARK_PLEX_PLAYED and action.rating_key is not None:
+        return _mark_played(action, clients)
+    if action.kind is ActionKind.SET_FILE_WATCHED and action.file_id is not None and action.when is not None:
+        return _set_watched(action, clients, action.file_id, action.when)
+    raise ValueError("not an executable action")
 
 
 class _Executor:
@@ -229,9 +257,18 @@ class _Executor:
     at the last moment (Shoko already has a date) is only listed in the CSV."""
 
     def __init__(
-        self, run_id: str, ledger: Ledger, clients: Clients, *, apply: bool, budget: int, stop: threading.Event | None
+        self,
+        run_id: str,
+        ledger: Ledger,
+        clients: Clients,
+        *,
+        apply: bool,
+        budget: int,
+        stop: threading.Event | None,
+        file_state: FileStateLookup,
     ) -> None:
         self._run_id = run_id
+        self._file_state = file_state
         self._ledger = ledger
         self._clients = clients
         self._apply = apply
@@ -276,8 +313,21 @@ class _Executor:
             return outcome
         self._budget -= 1
         self.shoko_changed += outcome.detail == "shoko_changed"
-        self._ledger.record(self._run_id, action, outcome.status, outcome.detail)
+        outcome = replace(outcome, before=self._audit_before(outcome))
+        self._ledger.record(
+            self._run_id, action, outcome.status, outcome.detail, before=outcome.before, after=outcome.after
+        )
         return outcome
+
+    def _audit_before(self, outcome: Outcome) -> dict[str, object]:
+        """State before the write: the snapshot's view of the fid, Plex viewCount, Shoko's UserStats."""
+        anidb = self._file_state(outcome.action.fid)
+        return {
+            "anidb_state": anidb.state if anidb else None,
+            "anidb_viewdate": (iso_utc(anidb.viewed_at) or None) if anidb else None,
+            "plex_view_count": outcome.action.plex_view_count,
+            **(outcome.before or {}),
+        }
 
 
 # --- run ---
@@ -302,11 +352,10 @@ def _open_clients(settings: Settings, clients: Clients | None) -> Iterator[Clien
         yield build_clients(settings, http)
 
 
-def _finish(outcomes: list[Outcome], report_path: Path, snapshot: MyListIndex | None = None) -> None:
-    if snapshot is None:
-        write_report(outcomes, report_path)
-    else:
-        write_report(outcomes, report_path, snapshot.file_state)
+def _finish(outcomes: list[Outcome], report_path: Path, file_state: FileStateLookup = no_file_state) -> None:
+    """Write the CSV and its HTML twin, then keep only the newest KEEP_REPORTS of each."""
+    write_report(outcomes, report_path, file_state)
+    write_html_report(outcomes, report_path.with_suffix(".html"), file_state)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 
@@ -355,9 +404,17 @@ def run_once(
         closing(Ledger(Path(settings.data_dir) / "ledger.sqlite")) as ledger,
     ):
         actions = _plan_actions(settings, active, ledger, snapshot, now)
-        executor = _Executor(run_id, ledger, active, apply=apply, budget=_write_budget(settings, limit), stop=stop)
+        executor = _Executor(
+            run_id,
+            ledger,
+            active,
+            apply=apply,
+            budget=_write_budget(settings, limit),
+            stop=stop,
+            file_state=snapshot.index.file_state,
+        )
         reported = [Outcome(a, Status.REPORTED) for a in actions if a.kind is ActionKind.REPORT]
         outcomes = reported + executor.run(_execution_order(actions, rules, file_id))
 
-    _finish(outcomes, report_path, snapshot.index)
+    _finish(outcomes, report_path, snapshot.index.file_state)
     return _summarise(run_id, outcomes, executor.shoko_changed, report_path, apply=apply, fresh=snapshot.fresh)

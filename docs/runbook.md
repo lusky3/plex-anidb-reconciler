@@ -1,6 +1,6 @@
 # Rollout runbook
 
-State lives in `/data` (host: `/opt/plex-anidb-reconciler`): `ledger.sqlite` (applied and failed writes only) and one report per run at `reports/<run_id>.csv` (the newest 200 are kept).
+State lives in `/data` (host: `/opt/plex-anidb-reconciler`): `ledger.sqlite` (applied and failed writes only, each with a `before` and `after` JSON column: the snapshot state/view date of the fid, Plex `viewCount` and Shoko's `LastWatchedAt`/`WatchedCount` read just before the write; `after` is the date written to Shoko or `{"plex_played": true}`, empty for a failed write) and one report per run at `reports/<run_id>.csv` plus a self-contained `reports/<run_id>.html` with the same rows and the summary counts on top (the newest 200 of each are kept). Ledgers from older versions get the two columns added on first open (old rows stay empty).
 
 Secrets come from Doppler, project `misc`, config `dev`: `SHOKO_API_KEY` and `PLEX_TOKEN` (or wherever you keep the Plex token). If `PLEX_TOKEN` is not in Doppler yet, add it there next to `SHOKO_API_KEY` before step 6 (`doppler secrets set PLEX_TOKEN --project misc --config dev`). Every `docker compose` command below is prefixed with `doppler run --project misc --config dev --` so both reach the container; alternatively put them in a root-only env file and use `docker compose --env-file /root/pxar.env ...`.
 

@@ -1,3 +1,6 @@
+import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
@@ -85,3 +88,40 @@ def test_applied_r1_keys_and_pending_sets(tmp_path, open_ledger):
     )
     assert led.applied_r1_keys() == frozenset({"rk1"})
     assert led.applied_sets() == [PendingWatch(7, 12345, (50,), SET.when)]
+
+
+def test_record_stores_before_and_after_as_json(tmp_path, open_ledger):
+    led = open_ledger(tmp_path / "l.sqlite")
+    led.record("run", SET, "applied", before={"b": 1, "when": None}, after={"a": "x"})
+    led.record("run", R1, "failed", "boom")
+    rows = led._db.execute("SELECT before, after FROM actions ORDER BY id").fetchall()
+    assert [(json.loads(b) if b else None, json.loads(a) if a else None) for b, a in rows] == [
+        ({"b": 1, "when": None}, {"a": "x"}),
+        (None, None),
+    ]
+
+
+OLD_SCHEMA = """
+CREATE TABLE actions (
+    id INTEGER PRIMARY KEY, run_id TEXT, rule TEXT, kind TEXT, rating_key TEXT, file_id INT, fid INT,
+    eids TEXT, when_ts TEXT, status TEXT, detail TEXT, created_at TEXT
+);
+INSERT INTO actions (run_id, rule, kind, rating_key, file_id, fid, eids, when_ts, status, detail, created_at)
+VALUES ('old', 'R2', 'set_file_watched', 'rk2', 7, 12345, '50', '2026-01-01T00:00:00+00:00', 'applied', '', 'x');
+"""
+
+
+def test_existing_ledger_without_before_after_is_migrated(tmp_path, open_ledger):
+    p = tmp_path / "l.sqlite"
+    with closing(sqlite3.connect(p)) as conn:
+        conn.executescript(OLD_SCHEMA)
+        conn.commit()
+    led = open_ledger(p)
+    cols = [r[1] for r in led._db.execute("PRAGMA table_info(actions)")]
+    assert cols[-2:] == ["before", "after"]
+    assert led.applied_sets() == [PendingWatch(7, 12345, (50,), datetime(2026, 1, 1, tzinfo=UTC))]
+    assert led.seen_success(ActionKind.SET_FILE_WATCHED, 7)
+    led.record("run", R1, "applied", before={"plex_view_count": 0}, after={"plex_played": True})
+    led.close()
+    again = open_ledger(p)  # opening a migrated ledger again is a no-op
+    assert again._db.execute("SELECT COUNT(*), COUNT(before) FROM actions").fetchone() == (2, 1)

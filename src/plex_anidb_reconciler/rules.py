@@ -77,6 +77,7 @@ def _set(
     *,
     when: datetime,
     matched_path: str | None,
+    plex_view_count: int,
     depends_on: int | None = None,
 ) -> Action:
     return Action(
@@ -92,6 +93,7 @@ def _set(
         matched_path=matched_path,
         aid=shoko_file.aid,
         release_group=shoko_file.release_group,
+        plex_view_count=plex_view_count,
     )
 
 
@@ -154,6 +156,7 @@ def _plan_r1(rating_key: str, eids: tuple[int, ...], watch_state: WatchState) ->
             eids=eids,
             when=None,
             reason="anidb_episode_watched",
+            plex_view_count=0,  # R1 is only planned for unwatched Plex items
         )
         return [mark]
     if any(e in watched for e in eids):
@@ -178,12 +181,21 @@ def _plan_r2(
         return _report(Rule.R4, "no_date", rating_key, shoko_file)
     if not ctx.snapshot_fresh:
         return _report(Rule.R4, "stale_snapshot", rating_key, shoko_file, when)
-    return _set(Rule.R2, "new_watch", rating_key, shoko_file, when=when, matched_path=path)
+    return _set(
+        Rule.R2,
+        "new_watch",
+        rating_key,
+        shoko_file,
+        when=when,
+        matched_path=path,
+        plex_view_count=item.view_count,
+    )
 
 
 def _plan_r2b(
-    rating_key: str, shoko_file: ShokoFile, path: str | None, plays_all: list[datetime], ctx: PlanContext
+    item: PlexItem, shoko_file: ShokoFile, path: str | None, plays_all: list[datetime], ctx: PlanContext
 ) -> Action:
+    rating_key = item.rating_key
     if shoko_file.created_at is None:
         return _report(Rule.R2B, "unknown_file_age", rating_key, shoko_file)
     if ctx.r2b_policy is not R2bPolicy.RECORD:
@@ -206,6 +218,7 @@ def _plan_r2b(
         shoko_file,
         when=min(plays),
         matched_path=path,
+        plex_view_count=item.view_count,
         depends_on=prerequisite,
     )
 
@@ -224,7 +237,7 @@ def _plan_file(item: PlexItem, shoko_file: ShokoFile, path: str | None, ctx: Pla
         return _plan_r2(item, shoko_file, path, plays_all, ctx)
     if len(watched_of_file) < len(shoko_file.eids):
         return _report(Rule.R4, "partial_episode", rating_key, shoko_file)
-    return _plan_r2b(rating_key, shoko_file, path, plays_all, ctx)
+    return _plan_r2b(item, shoko_file, path, plays_all, ctx)
 
 
 def _plan_item(item: PlexItem, resolution: list[Match] | tuple[Action, ...], ctx: PlanContext) -> list[Action]:

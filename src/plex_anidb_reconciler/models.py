@@ -111,6 +111,8 @@ class Action:
     # Report only: AniDB anime id and release group of the file, as Shoko knows them.
     aid: int | None = None
     release_group: str | None = None
+    # Audit only: the Plex item's viewCount when the action was planned.
+    plex_view_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,8 +127,11 @@ class PendingWatch:
 
 @dataclass(frozen=True)
 class Outcome:
-    """What happened to one planned action in a run (one CSV row)."""
+    """What happened to one planned action in a run (one CSV row). Writes also carry the audit state
+    before the write and the state written (ledger ``before``/``after``)."""
 
     action: Action
     status: Status
     detail: str = ""
+    before: dict[str, object] | None = None
+    after: dict[str, object] | None = None

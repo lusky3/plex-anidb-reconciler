@@ -3,6 +3,7 @@
 Only ``applied`` and ``failed`` rows are stored; planned/skipped/capped/reported actions go to
 the per-run CSV report only, so the ledger grows with real writes, not with every poll."""
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,9 @@ CREATE TABLE IF NOT EXISTS actions (
     when_ts TEXT,
     status TEXT,
     detail TEXT,
-    created_at TEXT
+    created_at TEXT,
+    before TEXT,
+    after TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_actions_kind_status_rk ON actions (kind, status, rating_key);
 CREATE INDEX IF NOT EXISTS ix_actions_kind_status_file ON actions (kind, status, file_id);
@@ -39,6 +42,18 @@ _SEEN_SUCCESS = {
 }
 
 
+# Static statements only (no SQL built from strings).
+_AUDIT_COLUMNS = ("before", "after")
+_ADD_COLUMN = {
+    "before": "ALTER TABLE actions ADD COLUMN before TEXT",
+    "after": "ALTER TABLE actions ADD COLUMN after TEXT",
+}
+
+
+def _json_or_null(value: dict[str, object] | None) -> str | None:
+    return None if value is None else json.dumps(value, sort_keys=True)
+
+
 def iso_utc(value: datetime | None) -> str:
     return value.astimezone(UTC).isoformat() if value else ""
 
@@ -48,7 +63,15 @@ class Ledger:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.executescript(_SCHEMA)
+        self._add_missing_columns()
         self._db.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Ledgers created before the before/after audit columns existed get them added (old rows: NULL)."""
+        present = {row[1] for row in self._db.execute("PRAGMA table_info(actions)")}
+        for column in _AUDIT_COLUMNS:
+            if column not in present:
+                self._db.execute(_ADD_COLUMN[column])
 
     def close(self) -> None:
         self._db.close()
@@ -86,12 +109,22 @@ class Ledger:
             for file_id, fid, eids, when_ts in rows
         ]
 
-    def record(self, run_id: str, action: Action, status: Status | str, detail: str = "") -> None:
+    def record(
+        self,
+        run_id: str,
+        action: Action,
+        status: Status | str,
+        detail: str = "",
+        *,
+        before: dict[str, object] | None = None,
+        after: dict[str, object] | None = None,
+    ) -> None:
+        """Store one applied or failed write; before/after (JSON) are the audited state around it."""
         if status not in STATUSES:
             raise ValueError(f"unknown ledger status: {status}")
         self._db.execute(
             "INSERT INTO actions (run_id, rule, kind, rating_key, file_id, fid, eids, when_ts, status, detail,"
-            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " created_at, before, after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 action.rule,
@@ -104,6 +137,8 @@ class Ledger:
                 str(status),
                 detail,
                 datetime.now(UTC).isoformat(),
+                _json_or_null(before),
+                _json_or_null(after),
             ),
         )
         self._db.commit()

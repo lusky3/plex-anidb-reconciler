@@ -1,6 +1,7 @@
-"""CSV report and stdout summary."""
+"""Per-run CSV and HTML reports and the stdout summary."""
 
 import csv
+import html
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -57,11 +58,12 @@ def report_row(outcome: Outcome, file_state: FileStateLookup) -> list[object]:
     ]
 
 
-def _no_file_state(fid: int | None) -> MyListFileState | None:
+def no_file_state(fid: int | None) -> MyListFileState | None:
+    """FileStateLookup for when there is no snapshot: every snapshot column stays empty."""
     return None
 
 
-def write_report(outcomes: list[Outcome], path: Path, file_state: FileStateLookup = _no_file_state) -> None:
+def write_report(outcomes: list[Outcome], path: Path, file_state: FileStateLookup = no_file_state) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -69,10 +71,48 @@ def write_report(outcomes: list[Outcome], path: Path, file_state: FileStateLooku
         writer.writerows(report_row(outcome, file_state) for outcome in outcomes)
 
 
+_HTML_STYLE = (
+    "body{font-family:system-ui,sans-serif;margin:1rem;color:#1a1a1a;background:#fff}"
+    "table{border-collapse:collapse;font-size:.85rem}"
+    "th,td{border:1px solid #ccc;padding:.2rem .4rem;text-align:left;white-space:nowrap}"
+    "th{background:#f0f0f0;position:sticky;top:0}"
+    "@media (prefers-color-scheme:dark){body{color:#e6e6e6;background:#161616}"
+    "th{background:#2a2a2a}th,td{border-color:#444}}"
+)
+
+
+def _cell(value: object, tag: str = "td") -> str:
+    return f"<{tag}>{html.escape(str(value), quote=True)}</{tag}>"
+
+
+def write_html_report(outcomes: list[Outcome], path: Path, file_state: FileStateLookup = no_file_state) -> None:
+    """Self-contained HTML version of the CSV (no scripts, no external resources): summary counts, then
+    one table row per action. Every cell, including the summary, is HTML-escaped."""
+    title = html.escape(path.stem)
+    summary = "".join(f"<li>{html.escape(line)}</li>" for line in summarize(outcomes).splitlines())
+    header = "".join(_cell(column, "th") for column in COLUMNS)
+    rows = "".join("<tr>" + "".join(_cell(v) for v in report_row(o, file_state)) + "</tr>" for o in outcomes)
+    page = (
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>pxar run {title}</title><style>{_HTML_STYLE}</style></head><body>"
+        f"<h1>pxar run {title}</h1><ul>{summary}</ul>"
+        f"<table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></body></html>\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(page, encoding="utf-8")
+
+
 def prune_reports(directory: Path, keep: int = 200) -> None:
-    """Keep the newest ``keep`` run reports. Run ids start with a UTC timestamp, so names sort by age."""
+    """Keep the newest ``keep`` run reports of each format (CSV, HTML). Run ids start with a UTC timestamp,
+    so names sort by age."""
+    for pattern in ("*.csv", "*.html"):
+        _prune(directory, pattern, keep)
+
+
+def _prune(directory: Path, pattern: str, keep: int) -> None:
     try:
-        reports = sorted(p for p in directory.glob("*.csv") if p.is_file())
+        reports = sorted(p for p in directory.glob(pattern) if p.is_file())
     except OSError:
         return
     for old in reports[: max(len(reports) - keep, 0)]:

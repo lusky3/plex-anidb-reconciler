@@ -42,3 +42,59 @@ def test_summary_splits_reports_by_reason_and_writes_by_status():
 
 def test_summary_empty():
     assert summarize([]) == "no actions"
+
+
+def test_prune_keeps_newest_csv_and_html_separately(tmp_path):
+    stems = [f"2026010{d}T000000Z-abc{d}" for d in range(1, 5)]
+    for stem in stems:
+        (tmp_path / f"{stem}.csv").write_text("x")
+        (tmp_path / f"{stem}.html").write_text("x")
+    prune_reports(tmp_path, keep=2)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        f"{stem}.{ext}" for stem in stems[-2:] for ext in ("csv", "html")
+    )
+
+
+def test_html_report_escapes_every_cell_and_shows_summary(tmp_path):
+    from datetime import UTC, datetime
+
+    from plex_anidb_reconciler.models import MyListFileState
+    from plex_anidb_reconciler.report import write_html_report
+
+    evil = Action(
+        kind=ActionKind.SET_FILE_WATCHED,
+        rule="R2",
+        rating_key="<rk>&",
+        file_id=3,
+        fid=33,
+        eids=(52,),
+        when=datetime(2026, 1, 1, tzinfo=UTC),
+        reason="new_watch",
+        release_group='<script>alert("g")</script>',
+    )
+    outcomes = [
+        Outcome(evil, "failed", "<img src=x onerror=alert(1)>"),
+        Outcome(_act(ActionKind.REPORT, "R4", "no_shoko_match"), "reported"),
+    ]
+    path = tmp_path / "reports" / "run.html"
+    write_html_report(outcomes, path, lambda fid: MyListFileState(4, None, 9) if fid == 33 else None)
+    page = path.read_text(encoding="utf-8")
+    assert page.startswith("<!doctype html>")
+    assert "<script" not in page and "<img" not in page and "<rk>" not in page
+    assert "&lt;script&gt;alert(&quot;g&quot;)&lt;/script&gt;" in page
+    assert "&lt;img src=x onerror=alert(1)&gt;" in page and "&lt;rk&gt;&amp;" in page
+    assert page.index("R2 failed: 1") < page.index("<table")  # summary counts above the table
+    assert "R4 reported no_shoko_match: 1" in page
+    assert "http" not in page.replace("http-equiv", "")  # no external resources
+    header = page[page.index("<thead>") : page.index("</thead>")]
+    for column in ("rule", "status", "aid", "release_group", "anidb_state", "anidb_viewdate"):
+        assert f"<th>{column}</th>" in header
+    assert page.count("<tr>") == 3  # header + 2 rows
+
+
+def test_html_report_empty(tmp_path):
+    from plex_anidb_reconciler.report import write_html_report
+
+    path = tmp_path / "run.html"
+    write_html_report([], path)
+    assert "no actions" in path.read_text(encoding="utf-8")

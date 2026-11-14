@@ -445,7 +445,7 @@ def test_reports_pruned_to_newest(env, monkeypatch):
     mock_servers()
     monkeypatch.setattr(runner, "KEEP_REPORTS", 2)
     paths = [go(env, apply=False, now=datetime(2026, 1, d, tzinfo=UTC)).report_path for d in (1, 2, 3)]
-    assert sorted(p.name for p in paths[0].parent.iterdir()) == sorted(p.name for p in paths[1:])
+    assert sorted(p.name for p in paths[0].parent.glob("*.csv")) == sorted(p.name for p in paths[1:])
 
 
 # --- CLI hardening ---
@@ -829,3 +829,80 @@ def test_cached_index_keeps_aid_and_group_and_reads_older_caches(env):
     rows = _csv_dicts(go(env, apply=False, now=NOW + timedelta(minutes=2)).report_path)
     assert mock_servers.index.call_count == 1
     assert {(r["aid"], r["release_group"]) for r in rows if r["rule"] == "R2"} == {("1", "")}  # aid from snapshot
+
+
+# --- ledger before/after and HTML report ---
+
+
+def ledger_audit(env_):
+    rows = _query(
+        Path(env_["DATA_DIR"]) / "ledger.sqlite", "SELECT rule, status, before, after FROM actions ORDER BY id"
+    )
+    return [(rule, status, json.loads(b) if b else None, json.loads(a) if a else None) for rule, status, b, a in rows]
+
+
+@respx.mock
+def test_ledger_records_before_and_after(env):
+    mock_servers()
+    mock_user_stats({3: {"WatchedCount": 0, "LastWatchedAt": None, "ResumePosition": None}})
+    go(env, apply=True)
+    r1_before = {
+        "anidb_state": None,
+        "anidb_viewdate": None,
+        "plex_view_count": 0,
+        "shoko_last_watched_at": None,
+        "shoko_watched_count": None,
+    }
+    assert ledger_audit(env) == [
+        ("R1", "applied", r1_before, {"plex_played": True}),
+        ("R1", "applied", r1_before, {"plex_played": True}),
+        (
+            "R2",
+            "applied",
+            {
+                "anidb_state": 1,
+                "anidb_viewdate": None,
+                "plex_view_count": 1,
+                "shoko_last_watched_at": None,
+                "shoko_watched_count": 0,
+            },
+            {"shoko_last_watched_at": "2023-05-01T20:00:00+00:00"},
+        ),
+    ]
+
+
+@respx.mock
+def test_failed_write_has_before_but_no_after(env):
+    mock_servers(shoko_status=500)
+    go(env, apply=True, rules=frozenset({"R2"}))
+    ((rule, status, before, after),) = ledger_audit(env)
+    assert (rule, status, after) == ("R2", "failed", None)
+    assert before["shoko_watched_count"] == 0 and before["plex_view_count"] == 1
+
+
+@respx.mock
+def test_html_report_written_next_to_csv(env):
+    mock_servers()
+    res = go(env, apply=False)
+    html_path = res.report_path.with_suffix(".html")
+    page = html_path.read_text(encoding="utf-8")
+    assert "R2 dry_run: 1" in page and "<td>703</td>" in page
+
+
+@respx.mock
+def test_html_reports_pruned_with_csvs(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    mock_servers()
+    monkeypatch.setattr(runner, "KEEP_REPORTS", 2)
+    paths = [go(env, apply=False, now=datetime(2026, 1, d, tzinfo=UTC)).report_path for d in (1, 2, 3)]
+    kept = sorted(p.name for p in paths[0].parent.iterdir())
+    assert kept == sorted(f"{p.stem}.{ext}" for p in paths[1:] for ext in ("csv", "html"))
+
+
+@respx.mock
+def test_snapshot_unavailable_still_writes_html(env):
+    mock_servers()
+    os.remove(env["MYLIST_PATH"])
+    res = go(env, apply=True)
+    assert "no actions" in res.report_path.with_suffix(".html").read_text(encoding="utf-8")
