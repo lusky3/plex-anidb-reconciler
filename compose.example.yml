@@ -1,0 +1,25 @@
+services:
+  plex-anidb-reconciler:
+    build: .
+    container_name: plex-anidb-reconciler
+    restart: unless-stopped
+    # No published ports: Tautulli reaches :8787 over the saltbox docker network.
+    networks:
+      - saltbox
+    volumes:
+      - /opt/shoko/config/Shoko.CLI/MyList:/mylist:ro
+      - /opt/plex-anidb-reconciler:/data
+    environment:
+      SHOKO_URL: http://shoko:8111
+      PLEX_URL: http://plex:32400
+      PLEX_SECTIONS: "4,5"
+      SHOKO_TZ: America/New_York
+      R2B_POLICY: record
+      # Secrets come from Doppler (project `misc`, config `dev` holds SHOKO_API_KEY),
+      # e.g. `doppler run -- docker compose up -d`.
+      SHOKO_API_KEY: ${SHOKO_API_KEY}
+      PLEX_TOKEN: ${PLEX_TOKEN}
+
+networks:
+  saltbox:
+    external: true

@@ -4,6 +4,18 @@ Reconciles Plex watched flags with AniDB MyList via Shoko. Console script: `pxar
 
 Status: work in progress. Dry-run by default; writes only with `--apply`.
 
+## Usage
+
+```
+pxar plan              # dry run, writes a CSV report
+pxar apply [--limit N] # apply changes (capped by MAX_WRITES)
+pxar serve             # periodic runs plus POST /trigger on LISTEN
+```
+
+## Docker
+
+Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See `compose.example.yml` for a Saltbox deployment and [docs/runbook.md](docs/runbook.md) for the rollout checklist.
+
 ## Configuration
 
 | Variable | Default | Description |
