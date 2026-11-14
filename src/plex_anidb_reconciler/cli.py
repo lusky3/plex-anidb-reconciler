@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from plex_anidb_reconciler.config import Settings
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
+from plex_anidb_reconciler.serve import serve
 from plex_anidb_reconciler.shoko import ShokoError
 
 
@@ -17,20 +18,20 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("plan", help="dry run: report what would change")
     ap = sub.add_parser("apply", help="apply changes (capped by MAX_WRITES)")
     ap.add_argument("--limit", type=int, default=None, help="maximum writes this run")
-    sub.add_parser("serve", help="run the scheduled service (not implemented yet)")
+    sub.add_parser("serve", help="run the scheduled service and /trigger endpoint")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "serve":
-        print("serve: not implemented", file=sys.stderr)
-        return 1
     try:
         settings = Settings.from_env(os.environ)
     except ValueError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 1
+    if args.command == "serve":
+        serve(settings)
+        return 0
     apply = args.command == "apply"
     try:
         result = run_once(settings, apply=apply, limit=getattr(args, "limit", None), now=datetime.now(UTC))
