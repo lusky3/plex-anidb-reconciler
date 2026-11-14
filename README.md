@@ -11,7 +11,8 @@ existing AniDB or Shoko watched date or mark anything unwatched, in Plex or in A
 
 - Ambiguous paths and episode links get reported, not acted on. A Plex item backed by several files never reaches
   AniDB; it's marked played in Plex only when AniDB already shows all its episodes watched.
-- `plan` is a dry run; only `apply` and `serve` write, and a ledger records each write's before and after state.
+- `plan` is a dry run; only `apply` and `serve` write. A ledger records each write's before and after state, though
+  a write cut off by a hard kill (SIGKILL) between the API call and the ledger entry goes unrecorded.
 
 ## Requirements
 
@@ -34,12 +35,12 @@ Read the report, then work through the [deployment guide](docs/deployment.md) be
 
 | Command | What it does |
 | --- | --- |
-| `plan [--rules R] [--file-id N]` | Dry run. Writes a CSV/HTML report. Uncapped. |
-| `apply [--rules R] [--file-id N] [--limit N]` | Executes the plan, capped by `MAX_WRITES`. |
+| `plan [--rules R] [--file-id N] [--rating-key K]` | Dry run. Writes a CSV/HTML report. Uncapped. |
+| `apply [--rules R] [--file-id N] [--rating-key K] [--limit N]` | Executes the plan, capped by `MAX_WRITES`. |
 | `serve` | Applies every `POLL_MINUTES` and on `POST /trigger`; serves `/healthz`. |
 | `healthcheck` | Container probe: exit 0 if the local `/healthz` answers 200. |
 
-`--rules` takes a comma list of `R1`, `R2`, `R2b`. The image runs `serve` by default.
+`--rules` takes a comma list of `R1`, `R2`, `R2b`; `--rating-key` (repeatable) limits the run to those Plex items. The image runs `serve` by default.
 
 ## Documentation
 

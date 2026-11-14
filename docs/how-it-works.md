@@ -68,7 +68,7 @@ and with no snapshot at all the run plans nothing.
 `apply` runs every R1 first, then every R2, then every R2b. If an R2b depends on an R2 from the same run, it runs
 only when that R2 was applied in this run; otherwise it's `skipped` with `prerequisite_not_applied` and the next run
 looks at it again. Writes past `MAX_WRITES` (or `--limit`) come out `capped`, and writes the ledger already holds come
-out `skipped_ledger`. `--rules` and `--file-id` restrict which writes run, though the run always lists reports.
+out `skipped_ledger`. `--rules` and `--file-id` restrict which writes run, though the run always lists reports. `--rating-key` scopes a run to Plex items the way a `/trigger` does: everything is planned, but only those items' actions run and get listed.
 
 Right before each Shoko write the tool:
 

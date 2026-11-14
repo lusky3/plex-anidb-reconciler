@@ -59,11 +59,17 @@ whose storage state differs from the setting. Files Shoko already has as watched
 ## 5. Path map
 
 Plex and Shoko usually see the same files under different prefixes. To find the Plex path of an episode, open it in
-Plex Web and use `...` → Get Info, or ask the API:
+Plex Web and use `...` → Get Info, or ask the API. The `curl` checks in this guide run in your host shell, which
+doesn't read `.env`, and `plex` only resolves on the Docker network, so set both first:
+
+```sh
+export PLEX_TOKEN=<your token>
+export PLEX=http://localhost:32400   # any Plex address reachable from this host
+```
 
 ```sh
 curl -s -H "X-Plex-Token: $PLEX_TOKEN" -H 'Accept: application/json' \
-  http://plex:32400/library/metadata/<ratingKey> \
+  "$PLEX/library/metadata/<ratingKey>" \
   | jq -r '.MediaContainer.Metadata[0].Media[0].Part[0].file'
 ```
 
@@ -132,16 +138,18 @@ Do this after the canary and before the backfill. Stop at the first item that do
   `GET /api/v3/File/<id>?include=XRefs,AbsolutePaths&includeXRefs=true&includeDataFrom=AniDB` returns
   `SeriesIDs[].EpisodeIDs[]`, `AniDB.ID` and `Locations[].AbsolutePath`. If it doesn't, every write fails as
   `shoko_changed`: stop.
-- [ ] **Plex `/:/scrobble` doesn't create a history row.** Note the owner history count of one R1 item:
+- [ ] **Plex `/:/scrobble` doesn't create a history row.** Pick one R1 row from the `plan` CSV and note its
+  `rating_key`, then its owner history count (with `PLEX` and `PLEX_TOKEN` exported as in step 5):
 
   ```sh
   curl -s -H "X-Plex-Token: $PLEX_TOKEN" -H 'Accept: application/json' \
-    'http://plex:32400/status/sessions/history/all?accountID=1&metadataItemID=<ratingKey>' \
+    "$PLEX/status/sessions/history/all?accountID=1&metadataItemID=<ratingKey>" \
     | jq '.MediaContainer.size'
   ```
 
-  Run `apply --rules R1 --limit 1` and check again. If the count went up, stop; you'd have to exclude those rows
-  before R2/R2b may run.
+  Mark exactly that item with `apply --rules R1 --rating-key <ratingKey> --limit 1`, confirm the summary shows one
+  R1 `applied`, and check the count again. If it went up, stop; you'd have to exclude those rows before R2/R2b may
+  run.
 - [ ] **Multi-episode files in `mylist.json`.** For a file spanning several episodes, `mylist.json` has one entry
   per (`FileID`, `EpisodeID`). With only one entry, such files report `eid_mismatch` and never reconcile (nothing
   gets written for them): stop.
