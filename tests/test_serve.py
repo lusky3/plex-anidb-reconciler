@@ -26,6 +26,7 @@ def make_service(run_fn, clock=lambda: datetime(2026, 1, 1, tzinfo=UTC)):
         poll_minutes=15,
         listen="127.0.0.1:0",
         shutdown_grace_s=25,
+        run_stale_minutes=360,
         shoko_api_key="SHOKOSECRET",
         plex_token="PLEXSECRET",
     )
@@ -487,3 +488,41 @@ def test_healthcheck_exit_codes():
         server.server_close()
     assert healthcheck({"LISTEN": "127.0.0.1:1"}) == 1  # nothing listening
     assert healthcheck({"LISTEN": "garbage"}) == 1  # invalid LISTEN is unhealthy, not a crash
+
+
+def test_hung_run_goes_stale_after_run_stale_minutes():
+    clock = FakeClock()
+    gate = threading.Event()
+    started = threading.Event()
+
+    def run_fn(settings, **kw):
+        started.set()
+        gate.wait(30)
+        return FakeResult("r1", {})
+
+    svc = make_service(run_fn, clock=clock)
+    stop, t = start_loop(svc)
+    try:
+        assert svc.health().get("run_active_since") is None
+        svc.request_run()
+        assert started.wait(2)
+        since = clock().isoformat()
+        clock.advance(minutes=359)
+        assert svc.healthy() is True and svc.health()["loop"] == "ok"
+        assert svc.health()["run_active_since"] == since
+        clock.advance(minutes=2)  # 361 min > RUN_STALE_MINUTES
+        h = svc.health()
+        assert svc.healthy() is False and h["loop"] == "stale" and h["run_active_since"] == since
+        server, base = start_http(svc)
+        try:
+            code, body = get(base + "/healthz")
+            assert code == 503 and body["loop"] == "stale" and body["run_active_since"] == since
+        finally:
+            server.shutdown()
+            server.server_close()
+        gate.set()
+        assert wait_for(lambda: svc.health()["last_run_id"] == "r1")
+        assert svc.health().get("run_active_since") is None and svc.healthy() is True
+    finally:
+        gate.set()
+        stop_loop(svc, stop, t)

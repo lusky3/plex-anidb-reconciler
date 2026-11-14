@@ -40,6 +40,7 @@ class Service:
         self._state_lock = threading.Lock()
         self._heartbeat: datetime | None = None  # last loop iteration or finished run
         self._loop_thread: threading.Thread | None = None
+        self._run_started: datetime | None = None  # set while a run is active
         self._stop: threading.Event | None = None  # shutdown signal, handed to every run
 
     def _beat(self) -> None:
@@ -47,15 +48,16 @@ class Service:
             self._heartbeat = self._clock()
 
     def healthy(self) -> bool:
-        """The loop thread is alive and either a run is in progress (a long run is not unhealthy) or it
-        has beaten within 2 x POLL_MINUTES + 5 min."""
+        """The loop thread is alive and either a run has been active for at most RUN_STALE_MINUTES (a long
+        run is not unhealthy, a hung one is) or, when idle, it has beaten within 2 x POLL_MINUTES + 5 min."""
         with self._state_lock:
             beat = self._heartbeat
             thread = self._loop_thread
+            started = self._run_started
         if thread is None or not thread.is_alive() or beat is None:
             return False
-        if self._lock.locked():  # a reconcile is running; the loop beats again when it finishes
-            return True
+        if started is not None:  # a reconcile is running; the loop beats again when it finishes
+            return self._clock() - started <= timedelta(minutes=self.settings.run_stale_minutes)
         limit = timedelta(minutes=2 * self.settings.poll_minutes + 5)
         return self._clock() - beat <= limit
 
@@ -65,11 +67,17 @@ class Service:
     def health(self) -> dict:
         loop = "ok" if self.healthy() else "stale"
         with self._state_lock:
-            return {**self._state, "loop": loop}
+            started = self._run_started
+            out = {**self._state, "loop": loop}
+        if started is not None:
+            out["run_active_since"] = started.astimezone(UTC).isoformat()
+        return out
 
     def run_pending_now(self) -> None:
         """Run one reconcile (blocking if one is in flight). Never raises."""
         with self._lock:
+            with self._state_lock:
+                self._run_started = self._clock()
             run_id = None
             snapshot = None
             try:
@@ -87,6 +95,7 @@ class Service:
                 self._state["last_status"] = status
                 self._state["last_finished"] = self._clock().isoformat()
                 self._heartbeat = self._clock()
+                self._run_started = None
 
     def loop(self, stop: threading.Event) -> None:
         interval = max(self.settings.poll_minutes, 1) * 60

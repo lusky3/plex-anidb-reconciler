@@ -19,6 +19,8 @@ services:
       PLEX_SECTIONS: "4,5"
       SHOKO_TZ: America/New_York
       R2B_POLICY: record
+      # /healthz turns 503 if a single run is still active after this many minutes (default 360).
+      # RUN_STALE_MINUTES: "360"
       # Plex and Shoko see the files under different prefixes: plexprefix=shokoprefix[;...]
       # (see docs/runbook.md step 5).
       # PATH_MAP: /data/TV=/mnt/media/TV

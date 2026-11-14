@@ -40,6 +40,7 @@ Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See
 | `POLL_MINUTES` | `15` | Poll interval (>= 1) |
 | `SHOKO_INDEX_TTL_MIN` | `60` | Shoko index cache TTL in minutes; `0` = no cache (fetch every run) |
 | `LISTEN` | `0.0.0.0:8787` | Listen address: `host:port` or `[ipv6]:port`, port 1-65535 |
+| `RUN_STALE_MINUTES` | `360` | `/healthz` turns 503 (`"loop": "stale"`) when one run has been active longer than this (>= 1) |
 | `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0) |
 
 Blank optional variables fall back to their defaults, with two exceptions: a blank `SHOKO_TZ` or `PLEX_SECTIONS` is a config error, and the required variables (`SHOKO_URL`, `SHOKO_API_KEY`, `PLEX_URL`, `PLEX_TOKEN`) must be non-blank. Invalid values stop the program with a config error
