@@ -1,8 +1,8 @@
 """Daemon mode: periodic reconcile plus an on-demand /trigger endpoint (Tautulli).
 
 /trigger has no authentication: bind it to the Docker network only. The daemon
-should be the only process that applies; a concurrent CLI `pxar apply` in another
-process is not coordinated with this lock.
+should be the only process that applies, because this lock doesn't coordinate with
+a concurrent CLI `pxar apply` in another process.
 """
 
 import ipaddress

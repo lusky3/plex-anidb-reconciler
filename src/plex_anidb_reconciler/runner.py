@@ -290,8 +290,8 @@ def _execute(action: Action, clients: Clients) -> Outcome:
 
 class _Executor:
     """Decides each executable action's status in order, writing (apply) under the cap. Applied and
-    failed writes are committed to the ledger before the next write starts; a write found unnecessary
-    at the last moment (Shoko already has a date) is only listed in the CSV."""
+    failed writes get committed to the ledger before the next write starts. A write that turns out unnecessary at
+    the last moment (Shoko already has a date) shows up in the CSV and nowhere else."""
 
     def __init__(
         self,
@@ -429,8 +429,8 @@ def run_once(
     """rules/file_id restrict which executable actions (R1/R2/R2b) run; reports are always listed.
     rating_keys (a /trigger for specific Plex items): everything is planned as in a full run, then only the
     actions of those items are executed and listed; None: all.
-    Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions are recorded
-    as skipped/shutdown (an in-flight write completes and is recorded first).
+    Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions end up
+    as skipped/shutdown (an in-flight write completes and gets recorded first).
     Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
     run_id = _new_run_id(now)
     run = RunInfo(run_id, Path(settings.data_dir) / "reports" / f"{run_id}.csv", apply)

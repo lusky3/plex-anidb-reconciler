@@ -148,7 +148,7 @@ class ShokoClient:
 
     def get_file(self, file_id: int) -> ShokoFile:
         """Current state of one file (read-only), used to re-check right before a write.
-        The include* booleans are sent too in case this endpoint ignores ``include``."""
+        It sends the include* booleans too, in case this endpoint ignores ``include``."""
         params = {
             "include": "XRefs,AbsolutePaths",
             "includeXRefs": "true",
