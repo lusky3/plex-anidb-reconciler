@@ -13,5 +13,9 @@ COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER pxar
 EXPOSE 8787
+# Only meaningful for `serve` (healthy = /healthz 200: loop alive and recent). One-shot `plan`/`apply`
+# containers never listen, so they would report unhealthy: harmless, or run them with --no-healthcheck.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=5).status == 200 else 1)"]
 ENTRYPOINT ["pxar"]
 CMD ["serve"]

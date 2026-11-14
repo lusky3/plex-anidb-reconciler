@@ -3,6 +3,9 @@ services:
     build: .
     container_name: plex-anidb-reconciler
     restart: unless-stopped
+    # On SIGTERM the service waits up to SHUTDOWN_GRACE_S (default 25 s) for an in-flight run;
+    # keep Docker's stop timeout above that.
+    stop_grace_period: 30s
     # No published ports: Tautulli reaches :8787 over the saltbox docker network.
     networks:
       - saltbox
