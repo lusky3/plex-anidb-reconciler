@@ -164,6 +164,21 @@ jobs:
           # No build cache here: the published image is built fresh, never from GHA cache entries that
           # other runs (including pull requests) can write (cache poisoning).
           no-cache: true
+      # The pushed image is a fresh no-cache build, not the one the image job tested: check it by digest.
+      - name: Smoke test the pushed image
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+        run: docker run --rm --read-only --tmpfs /tmp "$REF" --help
+      - name: Vulnerability scan the pushed image (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
       - name: Verify attestations on the pushed image
         env:
           REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
