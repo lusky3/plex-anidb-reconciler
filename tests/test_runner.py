@@ -908,30 +908,90 @@ def test_snapshot_unavailable_still_writes_html(env):
     assert "no actions" in res.report_path.with_suffix(".html").read_text(encoding="utf-8")
 
 
-# --- run scoped to rating keys (/trigger with a rating key) ---
+# --- triggered runs (/trigger with rating keys): plan everything, act only on those items ---
+
+
+def decisions(res, rating_key=None):
+    """(rule, kind, file_id, when, reason, status) of the CSV rows, optionally of one Plex item only."""
+    return [
+        (r["rule"], r["kind"], r["file_id"], r["when"], r["reason"], r["status"], r["detail"])
+        for r in _csv_dicts(res.report_path)
+        if rating_key is None or r["rating_key"] == rating_key
+    ]
 
 
 @respx.mock
-def test_scoped_run_plans_only_those_rating_keys(env):
+def test_triggered_run_acts_only_on_those_rating_keys(env):
     scrobble, put = mock_servers()
     res = go(env, apply=True, rating_keys=frozenset({"c"}))
     assert res.counts == {"applied": 1}
     assert scrobble.call_count == 0 and put.call_count == 1
-    assert {r["rating_key"] for r in _csv_dicts(res.report_path)} == {"c"}
-    assert mock_servers.index.call_count == 1  # Shoko index, Plex sections and history still loaded
+    assert {r["rating_key"] for r in _csv_dicts(res.report_path)} == {"c"}  # reports listed for c only
 
 
 @respx.mock
-def test_scoped_run_unknown_key_plans_nothing_and_none_is_full(env):
+def test_triggered_run_unknown_key_does_nothing_and_none_is_full(env):
     mock_servers()
     assert go(env, apply=False, rating_keys=frozenset({"zzz"})).counts == {}
     assert go(env, apply=False, rating_keys=None).counts == {"dry_run": 3}
 
 
 @respx.mock
-def test_scoped_run_keeps_every_gate(env):
-    """A scoped run still respects the snapshot freshness gate."""
+def test_triggered_run_keeps_every_gate(env):
+    """The snapshot freshness gate applies to a triggered run too."""
     _, put = mock_servers()
     make_stale(env)
     res = go(env, apply=True, rating_keys=frozenset({"c"}))
     assert put.call_count == 0 and res.counts == {"reported": 1}
+
+
+def two_items_one_file(env_):
+    """Plex items a (played T_LATE) and b (played T_EARLY) are both the Shoko file 1."""
+    write_mylist(env_, [snap(11, 50, None)])
+    return mock_world(
+        [shoko_file(1, 11, 50)],
+        [plex_item("a", 1, 1, T_LATE), plex_item("b", 1, 1, T_EARLY)],
+        [("a", T_LATE), ("b", T_EARLY)],
+    )
+
+
+@respx.mock
+def test_triggered_run_uses_the_full_runs_earliest_date_for_a_shared_file(env):
+    _, put, _ = two_items_one_file(env)
+    full = [r for r in decisions(go(env, apply=False)) if r[1] == "set_file_watched"]
+    assert full == [("R2", "set_file_watched", "1", "2026-02-01T00:00:00+00:00", "new_watch", "dry_run", "")]
+    # the later-played item a is triggered: the one merged SET for file 1 is executed with b's earlier date
+    res = go(env, apply=True, rating_keys=frozenset({"a"}))
+    assert res.counts == {"applied": 1}
+    assert json.loads(put.calls.last.request.content)["LastWatchedAt"] == "2026-01-31T19:00:00-05:00"
+    rows = [r for r in decisions(res) if r[1] == "set_file_watched"]
+    assert rows == [("R2", "set_file_watched", "1", "2026-02-01T00:00:00+00:00", "new_watch", "applied", "")]
+
+
+@respx.mock
+def test_triggered_run_decides_exactly_like_the_full_run(env):
+    """Two files of one episode: file 2 (item b, earlier play) gets R2, file 1 (item a) an R2b that depends
+    on it. A run triggered for one item makes the full run's decisions for that item."""
+    dep_world(env)
+    full = go(env, apply=False)
+    for key in ("a", "b"):
+        triggered = go(env, apply=False, rating_keys=frozenset({key}))
+        expected = [
+            # an R2b whose prerequisite R2 belongs to an item outside the trigger cannot run this time
+            (*row[:5], "skipped", "prerequisite_not_applied") if row[0] == "R2b" and key == "a" else row
+            for row in decisions(full, key)
+        ]
+        assert decisions(triggered) == expected
+    assert decisions(full, "b")[0][:2] == ("R2", "set_file_watched")
+    assert decisions(full, "a")[0][:2] == ("R2b", "set_file_watched")
+
+
+@respx.mock
+def test_triggered_dependent_r2b_skipped_until_its_prerequisite_is_applied(env):
+    put = dep_world(env)
+    res = go(env, apply=True, rating_keys=frozenset({"a"}))
+    assert put.call_count == 0
+    assert set_rows(res) == [("R2b", "1", "skipped", "prerequisite_not_applied")]
+    res = go(env, apply=True, rating_keys=frozenset({"a", "b"}))
+    assert put_paths(put) == ["/api/v3/File/2/UserStats", "/api/v3/File/1/UserStats"]
+    assert set_rows(res) == [("R2", "2", "applied", ""), ("R2b", "1", "applied", "")]

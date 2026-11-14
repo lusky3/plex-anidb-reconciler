@@ -61,20 +61,44 @@ class RunResult:
 
 @dataclass(frozen=True)
 class RunScope:
-    """What a run covers. rating_keys: only plan these Plex items (None: all). rules/file_id: only execute
-    these writes (None: all); reports are always listed."""
+    """Which planned actions a run acts on. Planning always covers every Plex item, so a scoped run decides
+    exactly what a full run would; the scope only filters the result (before the write cap).
+
+    rating_keys (a /trigger for specific Plex items): only actions of these items are executed or listed
+    (None: all). rules/file_id: only these writes are executed (None: all); their reports are still listed."""
 
     rules: frozenset[Rule] | None = None
     file_id: int | None = None
     rating_keys: frozenset[str] | None = None
 
-    def plans(self, item: PlexItem) -> bool:
-        return self.rating_keys is None or item.rating_key in self.rating_keys
+    def lists(self, action: Action) -> bool:
+        if self.rating_keys is None:
+            return True
+        return action.rating_key in self.rating_keys or not self.rating_keys.isdisjoint(action.source_rating_keys)
 
     def executes(self, action: Action) -> bool:
-        return (self.rules is None or action.rule in self.rules) and (
-            self.file_id is None or action.file_id == self.file_id
+        return (
+            self.lists(action)
+            and (self.rules is None or action.rule in self.rules)
+            and (self.file_id is None or action.file_id == self.file_id)
         )
+
+
+@dataclass(frozen=True)
+class RunEnv:
+    """The open resources and settings one run plans and writes with."""
+
+    settings: Settings
+    clients: Clients
+    ledger: Ledger
+    now: datetime
+
+
+@dataclass(frozen=True)
+class RunInfo:
+    run_id: str
+    report_path: Path
+    apply: bool
 
 
 @dataclass(frozen=True)
@@ -180,23 +204,19 @@ def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | None:
     return Snapshot(MyListIndex(entries), snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h)))
 
 
-def _plan_actions(
-    settings: Settings, clients: Clients, ledger: Ledger, snapshot: Snapshot, now: datetime, scope: RunScope
-) -> list[Action]:
-    """Load the Shoko index and Plex state and plan. Every input is always loaded in full; a run scoped to
-    rating keys only plans those Plex items (every gate still applies)."""
-    files = _shoko_index(settings, clients.shoko, now)
-    items, history = _fetch_plex(settings, clients.plex)
-    items = [item for item in items if scope.plans(item)]
+def _plan_actions(env: RunEnv, snapshot: Snapshot) -> list[Action]:
+    """Load the Shoko index and every Plex item and plan them all (also for a scoped run)."""
+    files = _shoko_index(env.settings, env.clients.shoko, env.now)
+    items, history = _fetch_plex(env.settings, env.clients.plex)
     return plan(
         items,
         history,
-        PathMatcher(files, settings.path_map),
+        PathMatcher(files, env.settings.path_map),
         snapshot.index,
-        settings.r2b_policy,
+        env.settings.r2b_policy,
         snapshot.fresh,
-        r1_marked=ledger.applied_r1_keys(),
-        pending=ledger.applied_sets(),
+        r1_marked=env.ledger.applied_r1_keys(),
+        pending=env.ledger.applied_sets(),
     )
 
 
@@ -383,16 +403,15 @@ def _snapshot_unavailable(run_id: str, report_path: Path) -> RunResult:
     return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE)
 
 
-def _summarise(
-    run_id: str, outcomes: list[Outcome], shoko_changed: int, report_path: Path, *, apply: bool, fresh: bool
-) -> RunResult:
+def _summarise(run: RunInfo, outcomes: list[Outcome], shoko_changed: int, fresh: bool) -> RunResult:
     print(summarize(outcomes))
     counts: dict[str, int] = dict(Counter(o.status for o in outcomes))
     if shoko_changed:
         counts["shoko_changed"] = shoko_changed
     snapshot = SnapshotState.OK if fresh else SnapshotState.STALE
-    log.info("run %s (%s, snapshot %s): %s", run_id, "apply" if apply else "plan", snapshot, counts or "no actions")
-    return RunResult(run_id, counts, report_path, snapshot)
+    mode = "apply" if run.apply else "plan"
+    log.info("run %s (%s, snapshot %s): %s", run.run_id, mode, snapshot, counts or "no actions")
+    return RunResult(run.run_id, counts, run.report_path, snapshot)
 
 
 def run_once(
@@ -408,22 +427,23 @@ def run_once(
     rating_keys: frozenset[str] | None = None,
 ) -> RunResult:
     """rules/file_id restrict which executable actions (R1/R2/R2b) run; reports are always listed.
-    rating_keys (a /trigger for specific Plex items) restricts planning to those items; None plans all.
+    rating_keys (a /trigger for specific Plex items): everything is planned as in a full run, then only the
+    actions of those items are executed and listed; None: all.
     Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions are recorded
     as skipped/shutdown (an in-flight write completes and is recorded first).
     Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
     run_id = _new_run_id(now)
-    report_path = Path(settings.data_dir) / "reports" / f"{run_id}.csv"
+    run = RunInfo(run_id, Path(settings.data_dir) / "reports" / f"{run_id}.csv", apply)
     snapshot = _load_snapshot(settings, now)
     if snapshot is None:
-        return _snapshot_unavailable(run_id, report_path)
+        return _snapshot_unavailable(run_id, run.report_path)
 
     with (
         _open_clients(settings, clients) as active,
         closing(Ledger(Path(settings.data_dir) / "ledger.sqlite")) as ledger,
     ):
         scope = RunScope(rules, file_id, rating_keys)
-        actions = _plan_actions(settings, active, ledger, snapshot, now, scope)
+        actions = [a for a in _plan_actions(RunEnv(settings, active, ledger, now), snapshot) if scope.lists(a)]
         executor = _Executor(
             run_id,
             ledger,
@@ -436,5 +456,5 @@ def run_once(
         reported = [Outcome(a, Status.REPORTED) for a in actions if a.kind is ActionKind.REPORT]
         outcomes = reported + executor.run(_execution_order(actions, scope))
 
-    _finish(outcomes, report_path, snapshot.index.file_state)
-    return _summarise(run_id, outcomes, executor.shoko_changed, report_path, apply=apply, fresh=snapshot.fresh)
+    _finish(outcomes, run.report_path, snapshot.index.file_state)
+    return _summarise(run, outcomes, executor.shoko_changed, snapshot.fresh)

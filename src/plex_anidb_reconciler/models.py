@@ -113,6 +113,9 @@ class Action:
     release_group: str | None = None
     # Audit only: the Plex item's viewCount when the action was planned.
     plex_view_count: int | None = None
+    # SETs only: every Plex item that planned a SET for this file. Several items can map to one file; the
+    # earliest date wins, so a run scoped to any of these items must act on this one merged SET.
+    source_rating_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

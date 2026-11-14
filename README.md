@@ -13,8 +13,11 @@ pxar serve                                                # periodic runs plus P
 ```
 
 `serve` runs a full reconcile every `POLL_MINUTES`. `POST /trigger` queues an immediate run: with a JSON body
-`{"rating_key": "123"}` (Tautulli Webhook agent, JSON data `{"rating_key": "{rating_key}"}`) only that Plex item
-is planned; without a usable key it is a full run. Triggers that arrive during a run are merged into the next
+`{"rating_key": "123"}` (Tautulli Webhook agent, JSON data `{"rating_key": "{rating_key}"}`) everything is planned
+exactly as in a full run, then only that Plex item's actions are executed and listed in the report (a file
+shared by several items gets the one SET a full run would make, with the earliest date; an R2b whose
+prerequisite R2 belongs to another, untriggered item is `skipped`/`prerequisite_not_applied` until that R2 is
+applied); without a usable key it is a full run. Triggers that arrive during a run are merged into the next
 run (the union of their rating keys, or a full run if any was keyless).
 
 Each run writes `reports/<run_id>.csv` and a self-contained `reports/<run_id>.html` (summary counts, then the

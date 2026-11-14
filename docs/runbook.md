@@ -23,7 +23,7 @@ Secrets come from Doppler, project `misc`, config `dev`: `SHOKO_API_KEY` and `PL
 - [ ] 9. **Go live.** When the Shoko queue is empty:
   - set `MyList_UpdateFrequency=4`
   - deploy `serve`: `doppler run --project misc --config dev -- docker compose up -d`
-  - in Tautulli add a **Webhook** notification agent: Webhook URL `http://plex-anidb-reconciler:8787/trigger`, method `POST`, trigger "Watched", and under Data -> Watched -> JSON Data: `{"rating_key": "{rating_key}"}`. Each notification then runs a reconcile limited to that Plex item (the Shoko index, snapshot and history are still loaded and every gate applies); triggers that arrive during a run are merged into one run for all their rating keys. A trigger without a usable `rating_key` (empty or non-JSON body, missing or non-numeric key) runs a full reconcile, and the periodic poll is always a full run.
+  - in Tautulli add a **Webhook** notification agent: Webhook URL `http://plex-anidb-reconciler:8787/trigger`, method `POST`, trigger "Watched", and under Data -> Watched -> JSON Data: `{"rating_key": "{rating_key}"}`. Each notification then runs a reconcile that plans everything exactly like a full run and executes (and lists in the report) only that Plex item's actions; triggers that arrive during a run are merged into one run for all their rating keys. A trigger without a usable `rating_key` (empty or non-JSON body, missing or non-numeric key) runs a full reconcile, and the periodic poll is always a full run.
 
 ## Live verification (after the canary, before the backfill)
 

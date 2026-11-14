@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, PlexItem, R2bPolicy, Rule, ShokoFile
@@ -281,19 +281,23 @@ def _keep_earliest_set(best_set: dict[int, Action], action: Action) -> None:
 
 
 def _merge(actions: list[Action]) -> tuple[list[Action], dict[int, Action]]:
-    """One SET per file_id (earliest date), one R1 per rating_key."""
+    """One SET per file_id (earliest date, remembering every item that planned one), one R1 per rating_key."""
     kept: list[Action] = []
     best_set: dict[int, Action] = {}
+    sources: dict[int, set[str]] = defaultdict(set)
     seen_r1: set[str | None] = set()
     for action in actions:
         if action.kind is ActionKind.SET_FILE_WATCHED:
             _keep_earliest_set(best_set, action)
+            if action.file_id is not None and action.rating_key is not None:
+                sources[action.file_id].add(action.rating_key)
         elif action.kind is not ActionKind.MARK_PLEX_PLAYED:
             kept.append(action)
         elif action.rating_key not in seen_r1:
             seen_r1.add(action.rating_key)
             kept.append(action)
-    return kept, best_set
+    merged = {file_id: replace(a, source_rating_keys=frozenset(sources[file_id])) for file_id, a in best_set.items()}
+    return kept, merged
 
 
 def _r2_conflict_winners(sets: Iterable[Action]) -> list[Action]:
