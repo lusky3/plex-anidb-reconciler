@@ -32,6 +32,13 @@ DELETE FROM actions WHERE status NOT IN ('applied', 'failed');
 """
 
 
+# Static queries only (no SQL built from strings): the key column depends on the action kind.
+_SEEN_SUCCESS = {
+    ActionKind.MARK_PLEX_PLAYED: "SELECT 1 FROM actions WHERE kind = ? AND rating_key = ? AND status = 'applied' LIMIT 1",
+    ActionKind.SET_FILE_WATCHED: "SELECT 1 FROM actions WHERE kind = ? AND file_id = ? AND status = 'applied' LIMIT 1",
+}
+
+
 def iso_utc(value: datetime | None) -> str:
     return value.astimezone(UTC).isoformat() if value else ""
 
@@ -49,17 +56,10 @@ class Ledger:
     def seen_success(self, kind: ActionKind, key: str | int | None) -> bool:
         """True when an action of this kind was already applied for the key
         (rating_key for MARK_PLEX_PLAYED, file_id for SET_FILE_WATCHED)."""
-        if kind is ActionKind.MARK_PLEX_PLAYED:
-            column = "rating_key"
-        elif kind is ActionKind.SET_FILE_WATCHED:
-            column = "file_id"
-        else:
+        query = _SEEN_SUCCESS.get(kind)
+        if query is None:
             return False
-        row = self._db.execute(
-            f"SELECT 1 FROM actions WHERE kind = ? AND {column} = ? AND status = 'applied' LIMIT 1",
-            (kind.value, key),
-        ).fetchone()
-        return row is not None
+        return self._db.execute(query, (kind.value, key)).fetchone() is not None
 
     def applied_r1_keys(self) -> frozenset[str]:
         """Rating keys the reconciler itself marked played in Plex (R1)."""
