@@ -28,6 +28,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # This workflow also publishes (main, tags, schedule): no dependency cache other runs can write.
+          enable-cache: false
       - run: uv sync --locked --python 3.14
       - run: uv run ruff check
       - run: uv run ruff format --check
