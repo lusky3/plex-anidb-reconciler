@@ -38,7 +38,7 @@ LABEL org.opencontainers.image.title="plex-anidb-reconciler" \
       org.opencontainers.image.description="Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko" \
       org.opencontainers.image.source="https://github.com/lusky3/plex-anidb-reconciler" \
       org.opencontainers.image.url="https://github.com/lusky3/plex-anidb-reconciler" \
-      org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/runbook.md" \
+      org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/deployment.md" \
       org.opencontainers.image.vendor="lusky3" \
       org.opencontainers.image.base.name="gcr.io/distroless/cc-debian13:nonroot"
 # The venv's interpreter symlinks into /python, so it must keep the same path.
@@ -48,7 +48,7 @@ COPY --from=build --chown=10001:10001 /out/data /data
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-# uid 10001 (not distroless's 65532) so the host /data ownership in docs/runbook.md step 0 stays valid.
+# uid 10001 (not distroless's 65532) so the host /data ownership in docs/deployment.md step 0 stays valid.
 USER 10001:10001
 WORKDIR /data
 EXPOSE 8787
