@@ -141,3 +141,72 @@ def test_paged_hard_page_cap(monkeypatch):
     with pytest.raises(PlexError, match="pagination"):
         make_client().list_episodes(5)
     assert route.call_count == 3
+
+
+def _hist_page(rows):
+    return httpx.Response(200, json={"MediaContainer": {"Metadata": rows}})
+
+
+@respx.mock
+def test_history_pages_sharing_first_rating_key_do_not_stall(monkeypatch):
+    """Rewatches repeat ratingKeys across history pages: only an identical page is a stall."""
+    from plex_anidb_reconciler import plex
+
+    monkeypatch.setattr(plex, "PAGE_SIZE", 2)
+    p1 = [
+        {"historyKey": "/h/1", "ratingKey": "7", "viewedAt": 100},
+        {"historyKey": "/h/2", "ratingKey": "8", "viewedAt": 101},
+    ]
+    p2 = [
+        {"historyKey": "/h/3", "ratingKey": "7", "viewedAt": 200},
+        {"historyKey": "/h/4", "ratingKey": "9", "viewedAt": 201},
+    ]
+    respx.get(f"{BASE}/status/sessions/history/all").mock(side_effect=[_hist_page(p1), _hist_page(p2), _hist_page([])])
+    hist = make_client().history(4)
+    assert hist["7"] == [datetime.fromtimestamp(100, UTC), datetime.fromtimestamp(200, UTC)]
+
+
+@respx.mock
+def test_history_pages_without_history_key_compare_rating_key_and_viewed_at(monkeypatch):
+    from plex_anidb_reconciler import plex
+
+    monkeypatch.setattr(plex, "PAGE_SIZE", 1)
+    respx.get(f"{BASE}/status/sessions/history/all").mock(
+        side_effect=[
+            _hist_page([{"ratingKey": "7", "viewedAt": 100}]),
+            _hist_page([{"ratingKey": "7", "viewedAt": 200}]),
+            _hist_page([]),
+        ]
+    )
+    assert make_client().history(4) == {"7": [datetime.fromtimestamp(100, UTC), datetime.fromtimestamp(200, UTC)]}
+
+
+@respx.mock
+def test_identical_consecutive_history_pages_raise(monkeypatch):
+    from plex_anidb_reconciler import plex
+
+    monkeypatch.setattr(plex, "PAGE_SIZE", 2)
+    page = [
+        {"historyKey": "/h/1", "ratingKey": "7", "viewedAt": 100},
+        {"historyKey": "/h/2", "ratingKey": "8", "viewedAt": 1},
+    ]
+    route = respx.get(f"{BASE}/status/sessions/history/all").mock(return_value=_hist_page(page))
+    with pytest.raises(PlexError, match="pagination"):
+        make_client().history(4)
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_history_entries_without_rating_key_do_not_trigger_stall(monkeypatch):
+    from plex_anidb_reconciler import plex
+
+    monkeypatch.setattr(plex, "PAGE_SIZE", 1)
+    respx.get(f"{BASE}/status/sessions/history/all").mock(
+        side_effect=[
+            _hist_page([{"historyKey": "/h/1", "viewedAt": 100}]),
+            _hist_page([{"historyKey": "/h/2", "viewedAt": 200}]),
+            _hist_page([{"historyKey": "/h/3", "ratingKey": "5", "viewedAt": 300}]),
+            _hist_page([]),
+        ]
+    )
+    assert make_client().history(4) == {"5": [datetime.fromtimestamp(300, UTC)]}

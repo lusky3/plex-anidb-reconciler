@@ -1,6 +1,7 @@
 """Plex Media Server client: episode watch state, owner play history, mark played."""
 
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import httpx
@@ -18,6 +19,15 @@ class PlexError(Exception):
 
 def _utc(epoch: int) -> datetime:
     return datetime.fromtimestamp(epoch, UTC)
+
+
+def _episode_sig(m: dict) -> object:
+    return m.get("ratingKey")
+
+
+def _history_sig(m: dict) -> object:
+    key = m.get("historyKey")
+    return key if key is not None else (m.get("ratingKey"), m.get("viewedAt"))
 
 
 class PlexClient:
@@ -38,10 +48,12 @@ class PlexClient:
             raise PlexError(f"GET {path} returned HTTP {resp.status_code}")
         return resp
 
-    def _paged(self, path: str, params: dict[str, str]) -> list[dict]:
+    def _paged(self, path: str, params: dict[str, str], signature: Callable[[dict], object]) -> list[dict]:
+        """Fetch every page. A page identical to the previous one (by ``signature`` of each entry) means
+        the server ignored the offset; history pages may legitimately repeat ratingKeys (rewatches)."""
         out: list[dict] = []
         start = 0
-        first_keys: set[str] = set()
+        previous: tuple | None = None
         for _ in range(MAX_PAGES):
             headers = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(PAGE_SIZE)}
             try:
@@ -51,10 +63,10 @@ class PlexClient:
             items = container.get("Metadata") or []
             if not items:
                 return out
-            first = str(items[0].get("ratingKey")) if isinstance(items[0], dict) else ""
-            if first in first_keys:
+            page = tuple(signature(m) if isinstance(m, dict) else None for m in items)
+            if page == previous:
                 raise PlexError(f"GET {path} pagination did not advance")
-            first_keys.add(first)
+            previous = page
             out.extend(items)
             start += len(items)
             total = container.get("totalSize")
@@ -63,7 +75,7 @@ class PlexClient:
         raise PlexError(f"GET {path} pagination exceeded {MAX_PAGES} pages")
 
     def list_episodes(self, section: int) -> list[PlexItem]:
-        raw = self._paged(f"/library/sections/{section}/all", {"type": "4"})
+        raw = self._paged(f"/library/sections/{section}/all", {"type": "4"}, _episode_sig)
         return [
             PlexItem(
                 rating_key=str(m["ratingKey"]),
@@ -80,7 +92,7 @@ class PlexClient:
     def history(self, section: int) -> dict[str, list[datetime]]:
         params = {"librarySectionID": str(section), "accountID": str(OWNER_ACCOUNT_ID)}
         grouped: dict[str, list[datetime]] = defaultdict(list)
-        for entry in self._paged("/status/sessions/history/all", params):
+        for entry in self._paged("/status/sessions/history/all", params, _history_sig):
             if entry.get("ratingKey") is None or entry.get("viewedAt") is None:
                 continue
             grouped[str(entry["ratingKey"])].append(_utc(entry["viewedAt"]))
