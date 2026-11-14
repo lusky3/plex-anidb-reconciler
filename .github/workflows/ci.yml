@@ -158,7 +158,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
+          # No build cache here: the published image is built fresh, never from GHA cache entries that
+          # other runs (including pull requests) can write (cache poisoning).
+          no-cache: true
       - name: Verify attestations on the pushed image
         env:
           REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
