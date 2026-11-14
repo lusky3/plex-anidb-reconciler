@@ -217,3 +217,21 @@ def test_null_or_missing_state_defaults_to_zero(tmp_path, drop):
         entry["State"] = None
     (e,) = load_mylist(write_entries(tmp_path, [entry]))
     assert e.state == 0 and e.fid == 3 and e.eid == 2
+
+
+def test_file_state_reports_state_latest_viewdate_and_aid():
+    from plex_anidb_reconciler.models import MyListEntry
+
+    t1 = datetime(2024, 1, 1, tzinfo=UTC)
+    t2 = datetime(2024, 2, 1, tzinfo=UTC)
+    index = MyListIndex(
+        [
+            MyListEntry(fid=7, eid=1, aid=42, viewed_at=t1, state=4),
+            MyListEntry(fid=7, eid=2, aid=42, viewed_at=t2, state=4),
+            MyListEntry(fid=8, eid=3, aid=43, viewed_at=None, state=1),
+        ]
+    )
+    assert index.file_state(7) == (4, t2, 42)
+    assert index.file_state(8) == (1, None, 43)
+    assert index.file_state(9) is None
+    assert index.file_state(None) is None

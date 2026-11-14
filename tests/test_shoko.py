@@ -236,3 +236,21 @@ def test_get_user_stats_http_error_raises():
     respx.get(f"{BASE}/api/v3/File/7/UserStats").mock(return_value=httpx.Response(404))
     with pytest.raises(ShokoError):
         make_client().get_user_stats(7)
+
+
+@respx.mock
+def test_list_files_parses_aid_and_release_group():
+    respx.get(f"{BASE}/api/v3/File").mock(return_value=httpx.Response(200, json=json.loads(FIXTURE.read_text())))
+    files = make_client().list_files()
+    assert [(f.aid, f.release_group) for f in files] == [(10, "SG"), (11, None), (12, "Long Name Only")]
+
+
+@respx.mock
+def test_missing_series_and_group_are_none():
+    respx.get(f"{BASE}/api/v3/File").mock(
+        return_value=httpx.Response(
+            200, json={"List": [{"ID": 9, "AniDB": {"ID": 1, "ReleaseGroup": None}, "SeriesIDs": [{"EpisodeIDs": []}]}]}
+        )
+    )
+    (f,) = make_client().list_files()
+    assert (f.aid, f.release_group) == (None, None)

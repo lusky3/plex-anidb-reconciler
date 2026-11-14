@@ -60,10 +60,24 @@ def _parse_user_stats(raw: object, tz: ZoneInfo) -> ShokoUserStats:
     return ShokoUserStats(count, parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=tz))
 
 
+def _release_group(raw: object) -> str | None:
+    """Short name, else full name, of the AniDB release group (report only; never fails a parse)."""
+    if not isinstance(raw, dict):
+        return None
+    for key in ("ShortName", "Name"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _parse_file(raw: dict, tz: ZoneInfo) -> ShokoFile:
     eids: list[int] = []
     manual = False
+    aid: int | None = None
     for series in raw.get("SeriesIDs") or []:
+        if aid is None:
+            aid = _opt_int((series.get("SeriesID") or {}).get("AniDB"))
         for ep in series.get("EpisodeIDs") or []:
             if ep.get("Source") == "User":
                 manual = True
@@ -79,6 +93,8 @@ def _parse_file(raw: dict, tz: ZoneInfo) -> ShokoFile:
         manual_link=manual,
         abs_paths=paths,
         created_at=_parse_created(raw.get("Created"), tz),
+        aid=aid,
+        release_group=_release_group(anidb.get("ReleaseGroup")),
     )
 
 

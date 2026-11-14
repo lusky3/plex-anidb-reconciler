@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, StrEnum
+from typing import NamedTuple
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,14 @@ class MyListEntry:
     state: int
 
 
+class MyListFileState(NamedTuple):
+    """What the MyList snapshot says about one AniDB file (report columns only, never decisions)."""
+
+    state: int
+    viewed_at: datetime | None  # latest ViewedAt over the file's entries
+    aid: int | None
+
+
 @dataclass(frozen=True)
 class ShokoFile:
     file_id: int
@@ -22,6 +31,8 @@ class ShokoFile:
     manual_link: bool
     abs_paths: tuple[str, ...]
     created_at: datetime | None = None
+    aid: int | None = None  # AniDB anime id (report only)
+    release_group: str | None = None  # AniDB release group short name, else name (report only)
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,9 @@ class Action:
     # SETs only: the Shoko absolute path the Plex path matched exactly. The pre-write re-check fails
     # (shoko_changed) if the file no longer has it, e.g. another release replaced the file at that path.
     matched_path: str | None = None
+    # Report only: AniDB anime id and release group of the file, as Shoko knows them.
+    aid: int | None = None
+    release_group: str | None = None
 
 
 @dataclass(frozen=True)

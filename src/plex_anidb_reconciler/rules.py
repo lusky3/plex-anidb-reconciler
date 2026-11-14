@@ -64,6 +64,8 @@ def _report(
         eids=shoko_file.eids if shoko_file else (),
         when=when,
         reason=reason,
+        aid=shoko_file.aid if shoko_file else None,
+        release_group=shoko_file.release_group if shoko_file else None,
     )
 
 
@@ -88,6 +90,8 @@ def _set(
         reason=reason,
         depends_on_file_id=depends_on,
         matched_path=matched_path,
+        aid=shoko_file.aid,
+        release_group=shoko_file.release_group,
     )
 
 

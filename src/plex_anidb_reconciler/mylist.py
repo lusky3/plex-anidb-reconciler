@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from plex_anidb_reconciler.models import MyListEntry
+from plex_anidb_reconciler.models import MyListEntry, MyListFileState
 
 
 class SnapshotError(Exception):
@@ -106,15 +106,24 @@ def snapshot_age(path: Path, now: datetime) -> timedelta:
     return now - mtime
 
 
+def _merge_state(current: MyListFileState | None, entry: MyListEntry) -> MyListFileState:
+    if current is None:
+        return MyListFileState(entry.state, entry.viewed_at, entry.aid)
+    dates = [d for d in (current.viewed_at, entry.viewed_at) if d is not None]
+    return MyListFileState(current.state, max(dates) if dates else None, current.aid or entry.aid)
+
+
 class MyListIndex:
     def __init__(self, entries: Iterable[MyListEntry]) -> None:
         self._watched_fids: set[int] = set()
         self._all_fids: set[int] = set()
         self._views: dict[int, list[datetime]] = defaultdict(list)
         self._fid_eids: dict[int, set[int]] = defaultdict(set)
+        self._file_states: dict[int, MyListFileState] = {}
         for entry in entries:
             if entry.fid:
                 self._all_fids.add(entry.fid)
+                self._file_states[entry.fid] = _merge_state(self._file_states.get(entry.fid), entry)
                 if entry.eid is not None:
                     self._fid_eids[entry.fid].add(entry.eid)
             if entry.viewed_at is None:
@@ -133,6 +142,10 @@ class MyListIndex:
     def eids_for_fid(self, fid: int | None) -> frozenset[int]:
         """Episodes AniDB links this file to (every snapshot entry for the fid with an EpisodeID)."""
         return frozenset(self._fid_eids.get(fid, ())) if fid else frozenset()
+
+    def file_state(self, fid: int | None) -> MyListFileState | None:
+        """State, latest view date and anime id of a file in the snapshot (for reports), or None."""
+        return self._file_states.get(fid) if fid else None
 
     def episode_watched_at(self, eid: int) -> list[datetime]:
         return list(self._views.get(eid, []))

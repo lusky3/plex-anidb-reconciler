@@ -50,10 +50,10 @@ PLEX = "http://plex:32400"
 def shoko_file(i, fid, eid):
     return {
         "ID": i,
-        "AniDB": {"ID": fid},
+        "AniDB": {"ID": fid, "ReleaseGroup": {"Name": f"Group {i}", "ShortName": f"G{i}"}},
         "Created": "2025-01-01T00:00:00+00:00",
         "Locations": [{"AbsolutePath": f"/p/{i}.mkv"}],
-        "SeriesIDs": [{"EpisodeIDs": [{"AniDB": eid, "Source": "AniDB"}]}],
+        "SeriesIDs": [{"SeriesID": {"ID": 1, "AniDB": 700 + i}, "EpisodeIDs": [{"AniDB": eid, "Source": "AniDB"}]}],
     }
 
 
@@ -258,11 +258,29 @@ def test_report_csv_columns(env):
         "when",
         "reason",
         "detail",
+        "aid",
+        "release_group",
+        "anidb_state",
+        "anidb_viewdate",
     ]
     assert res.report_path == __import__("pathlib").Path(env["DATA_DIR"]) / "reports" / f"{res.run_id}.csv"
     r2 = next(r for r in rows if r["rule"] == "R2")
     assert (r2["file_id"], r2["fid"], r2["eids"], r2["status"]) == ("3", "3", "52", "dry_run")
     assert r2["when"] == "2023-05-01T20:00:00+00:00"
+    assert (r2["aid"], r2["release_group"], r2["anidb_state"], r2["anidb_viewdate"]) == ("703", "G3", "1", "")
+    r1 = next(r for r in rows if r["rule"] == "R1")
+    assert (r1["aid"], r1["release_group"], r1["anidb_state"], r1["anidb_viewdate"]) == ("", "", "", "")
+
+
+@respx.mock
+def test_report_shows_anidb_state_and_viewdate_of_the_actions_fid(env):
+    """eid_mismatch report for fid 3: the snapshot has it watched, with a different episode."""
+    write_mylist(env, [snap(3, 99, "2023-03-01T21:00:00-05:00")])
+    mock_world([shoko_file(3, 3, 52)], [plex_item("c", 3, 1, 1682971200)])
+    rows = _csv_dicts(go(env, apply=False).report_path)
+    assert [(r["reason"], r["aid"], r["release_group"], r["anidb_state"], r["anidb_viewdate"]) for r in rows] == [
+        ("eid_mismatch", "703", "G3", "1", "2023-03-02T02:00:00+00:00")
+    ]
 
 
 @respx.mock
@@ -794,3 +812,20 @@ def test_dry_run_does_not_read_user_stats(env):
     stats = mock_user_stats({})
     go(env, apply=False)
     assert stats.call_count == 0
+
+
+@respx.mock
+def test_cached_index_keeps_aid_and_group_and_reads_older_caches(env):
+    mock_servers()
+    go(env, apply=False, now=NOW)
+    rows = _csv_dicts(go(env, apply=False, now=NOW + timedelta(minutes=1)).report_path)  # from the cache
+    assert mock_servers.index.call_count == 1
+    assert {(r["aid"], r["release_group"]) for r in rows if r["rule"] == "R2"} == {("703", "G3")}
+    cache_path = Path(env["DATA_DIR"]) / "shoko_index.json"
+    cache = json.loads(cache_path.read_text())
+    for f in cache["files"]:
+        del f["aid"], f["release_group"]  # cache written by an older version
+    cache_path.write_text(json.dumps(cache))
+    rows = _csv_dicts(go(env, apply=False, now=NOW + timedelta(minutes=2)).report_path)
+    assert mock_servers.index.call_count == 1
+    assert {(r["aid"], r["release_group"]) for r in rows if r["rule"] == "R2"} == {("1", "")}  # aid from snapshot

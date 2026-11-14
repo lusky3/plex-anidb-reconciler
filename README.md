@@ -12,6 +12,12 @@ pxar apply [--rules R1,R2,R2b] [--file-id N] [--limit N] # apply changes (capped
 pxar serve                                                # periodic runs plus POST /trigger on LISTEN
 ```
 
+Each run writes `reports/<run_id>.csv` under `DATA_DIR` with one row per action: `rule, kind, status,
+rating_key, file_id, fid, eids, when, reason, detail, aid, release_group, anidb_state, anidb_viewdate`.
+`aid` and `release_group` come from Shoko (`aid` falls back to the MyList snapshot); `anidb_state` (MyList
+`State`: 1 HDD, 2 disk, 3 deleted, 4 remote) and `anidb_viewdate` (UTC, empty if unwatched) are what the
+snapshot says about the row's fid, empty when the fid is not in it.
+
 `--rules` and `--file-id` restrict which writes run; reports are always listed. `apply` runs R1 before
 R2, and every R2 before any R2b, so a canary write to AniDB is `pxar apply --rules R2 --limit 1`. An R2b
 that relies on an R2 planned in the same run is only executed once that R2 was applied in this run;

@@ -18,7 +18,6 @@ from plex_anidb_reconciler.ledger import Ledger
 from plex_anidb_reconciler.models import (
     Action,
     ActionKind,
-    MyListEntry,
     Outcome,
     PlexItem,
     Rule,
@@ -54,7 +53,7 @@ class RunResult:
 
 @dataclass(frozen=True)
 class Snapshot:
-    entries: list[MyListEntry]
+    index: MyListIndex
     fresh: bool
 
 
@@ -76,6 +75,8 @@ def _file_to_json(shoko_file: ShokoFile) -> dict:
         "manual_link": shoko_file.manual_link,
         "abs_paths": list(shoko_file.abs_paths),
         "created_at": shoko_file.created_at.isoformat() if shoko_file.created_at else None,
+        "aid": shoko_file.aid,
+        "release_group": shoko_file.release_group,
     }
 
 
@@ -87,6 +88,8 @@ def _file_from_json(d: dict) -> ShokoFile:
         manual_link=d["manual_link"],
         abs_paths=tuple(d["abs_paths"]),
         created_at=datetime.fromisoformat(d["created_at"]) if d["created_at"] else None,
+        aid=d.get("aid"),  # absent in caches written by older versions
+        release_group=d.get("release_group"),
     )
 
 
@@ -148,7 +151,7 @@ def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | None:
         age = snapshot_age(path, now)
     except SnapshotError, OSError:
         return None
-    return Snapshot(entries, snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h)))
+    return Snapshot(MyListIndex(entries), snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h)))
 
 
 def _plan_actions(
@@ -160,7 +163,7 @@ def _plan_actions(
         items,
         history,
         PathMatcher(files, settings.path_map),
-        MyListIndex(snapshot.entries),
+        snapshot.index,
         settings.r2b_policy,
         snapshot.fresh,
         r1_marked=ledger.applied_r1_keys(),
@@ -299,8 +302,11 @@ def _open_clients(settings: Settings, clients: Clients | None) -> Iterator[Clien
         yield build_clients(settings, http)
 
 
-def _finish(outcomes: list[Outcome], report_path: Path) -> None:
-    write_report(outcomes, report_path)
+def _finish(outcomes: list[Outcome], report_path: Path, snapshot: MyListIndex | None = None) -> None:
+    if snapshot is None:
+        write_report(outcomes, report_path)
+    else:
+        write_report(outcomes, report_path, snapshot.file_state)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 
@@ -353,5 +359,5 @@ def run_once(
         reported = [Outcome(a, Status.REPORTED) for a in actions if a.kind is ActionKind.REPORT]
         outcomes = reported + executor.run(_execution_order(actions, rules, file_id))
 
-    _finish(outcomes, report_path)
+    _finish(outcomes, report_path, snapshot.index)
     return _summarise(run_id, outcomes, executor.shoko_changed, report_path, apply=apply, fresh=snapshot.fresh)
