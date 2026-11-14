@@ -1,0 +1,9 @@
+# Minimal qlty config: plugins are enabled by qlty.sh (or `qlty init` locally). This file only
+# carries repo-specific overrides.
+config_version = "0"
+
+# Test-only bandit false positives: pytest asserts (B101), servers bound to 0.0.0.0 in tests (B104),
+# fake tokens/keys (B105, B106) and urlopen against the local test server (B310).
+[[ignore]]
+rules = ["bandit:B101", "bandit:B104", "bandit:B105", "bandit:B106", "bandit:B310"]
+file_patterns = ["tests/**"]

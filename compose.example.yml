@@ -1,0 +1,47 @@
+services:
+  plex-anidb-reconciler:
+    # Published by CI (main and v* tags) with SBOM + provenance attestations. For production, pin the digest
+    # (`ghcr.io/lusky3/plex-anidb-reconciler@sha256:...`) or a version tag. `build: .` works for local builds.
+    image: ghcr.io/lusky3/plex-anidb-reconciler:latest
+    container_name: plex-anidb-reconciler
+    restart: unless-stopped
+    # Hardening: distroless image (no shell), non-root uid 10001, read-only root filesystem, no Linux
+    # capabilities, no privilege escalation. All state lives in the /data volume.
+    user: "10001:10001"
+    read_only: true
+    # Scratch space for Python/SQLite temp files, so nothing transient lands in the persistent /data volume.
+    tmpfs:
+      - /tmp:size=16m,mode=1777,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    # On SIGTERM the service waits up to SHUTDOWN_GRACE_S (default 25 s) for an in-flight run;
+    # keep Docker's stop timeout above that.
+    stop_grace_period: 30s
+    # No published ports: Tautulli reaches :8787 over the saltbox docker network.
+    networks:
+      - saltbox
+    # Container uid is 10001: /data must be owned by it; /mylist must be readable by it (see docs/runbook.md step 0).
+    volumes:
+      - /opt/shoko/config/Shoko.CLI/MyList:/mylist:ro
+      - /opt/plex-anidb-reconciler:/data
+    environment:
+      SHOKO_URL: http://shoko:8111
+      PLEX_URL: http://plex:32400
+      PLEX_SECTIONS: "4,5"
+      SHOKO_TZ: America/New_York
+      R2B_POLICY: record
+      # /healthz turns 503 if a single run is still active after this many minutes (default 360).
+      # RUN_STALE_MINUTES: "360"
+      # Plex and Shoko see the files under different prefixes: plexprefix=shokoprefix[;...]
+      # (see docs/runbook.md step 5).
+      # PATH_MAP: /data/TV=/mnt/media/TV
+      # Secrets come from Doppler (project `misc`, config `dev` holds SHOKO_API_KEY and PLEX_TOKEN;
+      # add PLEX_TOKEN there if missing), e.g. `doppler run --project misc --config dev -- docker compose up -d`.
+      SHOKO_API_KEY: ${SHOKO_API_KEY}
+      PLEX_TOKEN: ${PLEX_TOKEN}
+
+networks:
+  saltbox:
+    external: true

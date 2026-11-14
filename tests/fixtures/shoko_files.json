@@ -1,0 +1,18 @@
+{"Total": 3, "List": [
+ {"ID": 1, "Size": 1, "Hashes": {"ED2K": "a"},
+  "Locations": [{"ID": 1, "FileID": 1, "ImportFolderID": 1, "RelativePath": "A/Season 01/x.mkv",
+                 "AbsolutePath": "/mnt/media/TV/tv_anime/A/Season 01/x.mkv", "IsAccessible": true},
+                {"ID": 2, "FileID": 1, "ImportFolderID": 1, "RelativePath": "gone.mkv", "AbsolutePath": null, "IsAccessible": false}],
+  "AniDB": {"ID": 12345, "ReleaseGroup": {"ID": 5, "Name": "Some Group", "ShortName": "SG"}},
+  "SeriesIDs": [{"SeriesID": {"ID": 1, "AniDB": 10}, "EpisodeIDs": [{"ID": 1, "AniDB": 50, "Source": "AniDB"}]}]},
+ {"ID": 2, "Size": 1, "Hashes": {"ED2K": "b"},
+  "Locations": [{"ID": 3, "FileID": 2, "ImportFolderID": 1, "RelativePath": "B/y.mkv",
+                 "AbsolutePath": "/mnt/media/TV/tv_anime/B/y.mkv", "IsAccessible": true}],
+  "SeriesIDs": [{"SeriesID": {"ID": 2, "AniDB": 11}, "EpisodeIDs": [{"ID": 2, "AniDB": 70, "Source": "User"}]}]},
+ {"ID": 3, "Size": 1, "Hashes": {"ED2K": "c"},
+  "Locations": [{"ID": 4, "FileID": 3, "ImportFolderID": 1, "RelativePath": "C/z.mkv",
+                 "AbsolutePath": "/mnt/media/TV/tv_anime/C/z.mkv", "IsAccessible": true}],
+  "AniDB": {"ID": 777, "ReleaseGroup": {"ID": 6, "Name": "Long Name Only", "ShortName": null}},
+  "SeriesIDs": [{"SeriesID": {"ID": 3, "AniDB": 12}, "EpisodeIDs": [
+     {"ID": 3, "AniDB": 60, "Source": "AniDB"}, {"ID": 4, "AniDB": 61, "Source": "AniDB"}, {"ID": 5, "AniDB": 60, "Source": "AniDB"}]}]}
+]}
