@@ -16,7 +16,7 @@ def test_prune_missing_dir_is_noop(tmp_path):
 
 
 def _act(kind, rule, reason):
-    return Action(kind, rule, "rk", None, None, (), None, reason)
+    return Action(kind=kind, rule=rule, rating_key="rk", file_id=None, fid=None, eids=(), when=None, reason=reason)
 
 
 def test_summary_splits_reports_by_reason_and_writes_by_status():
