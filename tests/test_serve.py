@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -21,6 +20,33 @@ class FakeResult:
     snapshot: str = "ok"
 
 
+WAIT = 5  # upper bound for event waits; only a broken test ever reaches it
+
+
+class ObservedService(Service):
+    """Service that signals loop heartbeats and finished runs, so tests wait on events, not sleeps."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.beaten = threading.Event()
+        self._finished = threading.Condition()
+        self.runs_finished = 0
+
+    def _beat(self):
+        super()._beat()
+        self.beaten.set()
+
+    def run_pending_now(self):
+        super().run_pending_now()
+        with self._finished:
+            self.runs_finished += 1
+            self._finished.notify_all()
+
+    def wait_runs(self, n, timeout=WAIT):
+        with self._finished:
+            return self._finished.wait_for(lambda: self.runs_finished >= n, timeout)
+
+
 def make_service(run_fn, clock=lambda: datetime(2026, 1, 1, tzinfo=UTC)):
     settings = SimpleNamespace(
         poll_minutes=15,
@@ -30,7 +56,7 @@ def make_service(run_fn, clock=lambda: datetime(2026, 1, 1, tzinfo=UTC)):
         shoko_api_key="SHOKOSECRET",
         plex_token="PLEXSECRET",
     )
-    return Service(settings, run_fn=run_fn, clock=clock)
+    return ObservedService(settings, run_fn=run_fn, clock=clock)
 
 
 def start_http(svc):
@@ -45,21 +71,14 @@ def post(url, body=b"x"):
         return r.status, json.loads(r.read())
 
 
-def wait_for(cond, timeout=1.5):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.01)
-    return False
-
-
 def test_trigger_coalesces_concurrent_requests():
     calls = []
     gate = threading.Event()
+    first_started = threading.Event()
 
     def run_fn(settings, **kw):
         calls.append(kw)
+        first_started.set()
         gate.wait(30)  # released by the test; the bound only keeps a broken test from hanging forever
         return FakeResult(f"r{len(calls)}", {"moved": 1})
 
@@ -70,13 +89,14 @@ def test_trigger_coalesces_concurrent_requests():
     try:
         svc.request_run()
         t.start()
-        assert wait_for(lambda: len(calls) == 1)  # first run is in progress
+        assert first_started.wait(WAIT)  # first run is in progress
         for _ in range(5):
             assert post(base + "/trigger")[0] == 202
         gate.set()
-        assert wait_for(lambda: len(calls) == 2)
-        time.sleep(0.2)
-        assert len(calls) == 2  # 5 POSTs -> exactly 1 extra run
+        assert svc.wait_runs(2)
+        # nothing is pending after the second run, so no third run can start: 5 POSTs -> exactly 1 extra run
+        assert not svc._event.is_set()
+        assert len(calls) == 2
         assert calls[0]["apply"] is True
     finally:
         stop.set()
@@ -90,7 +110,8 @@ def start_loop(svc):
     stop = threading.Event()
     t = threading.Thread(target=svc.loop, args=(stop,), daemon=True)
     t.start()
-    assert wait_for(lambda: svc.health()["loop"] == "ok")
+    assert svc.beaten.wait(WAIT)
+    assert svc.health()["loop"] == "ok"
     return stop, t
 
 
@@ -162,23 +183,30 @@ def test_runs_never_overlap():
     active = 0
     peak = 0
     guard = threading.Lock()
+    inside = threading.Event()
+    release = threading.Event()
 
     def run_fn(settings, **kw):
         nonlocal active, peak
         with guard:
             active += 1
             peak = max(peak, active)
-        time.sleep(0.05)
+        inside.set()
+        release.wait(WAIT)  # the first run holds the lock until the others are queued behind it
         with guard:
             active -= 1
         return FakeResult("x", {})
 
     svc = make_service(run_fn)
     threads = [threading.Thread(target=svc.run_pending_now) for _ in range(4)]
-    for t in threads:
+    threads[0].start()
+    assert inside.wait(WAIT)
+    for t in threads[1:]:
         t.start()
+    release.set()
     for t in threads:
-        t.join(2)
+        t.join(WAIT)
+    assert svc.runs_finished == 4
     assert peak == 1
 
 
@@ -430,7 +458,8 @@ def test_long_run_keeps_healthz_ok_but_dead_loop_is_503():
         clock.advance(hours=3)  # far beyond 2 x POLL_MINUTES + 5 min, run still in progress
         assert svc.healthy() is True
         gate.set()
-        assert wait_for(lambda: svc.health()["last_run_id"] == "r1")
+        assert svc.wait_runs(1)
+        assert svc.health()["last_run_id"] == "r1"
         assert svc.healthy() is True  # finishing the run re-beats
         clock.advance(hours=3)  # idle and no beat for hours: stale
         assert svc.healthy() is False
@@ -526,7 +555,8 @@ def test_hung_run_goes_stale_after_run_stale_minutes():
             server.shutdown()
             server.server_close()
         gate.set()
-        assert wait_for(lambda: svc.health()["last_run_id"] == "r1")
+        assert svc.wait_runs(1)
+        assert svc.health()["last_run_id"] == "r1"
         assert svc.health().get("run_active_since") is None and svc.healthy() is True
     finally:
         gate.set()

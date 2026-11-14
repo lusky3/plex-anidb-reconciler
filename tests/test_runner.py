@@ -2,7 +2,6 @@ import csv
 import json
 import os
 import sqlite3
-import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +33,17 @@ def _query(db, sql):
 
 
 SHOKO = "http://shoko:8111"
+NOW = datetime(2026, 6, 1, 12, tzinfo=UTC)  # fixed run clock; the snapshot mtime is set relative to it
+
+
+def set_mtime(path, when):
+    os.utime(path, (when.timestamp(), when.timestamp()))
+
+
+def make_stale(env_):
+    set_mtime(env_["MYLIST_PATH"], NOW - timedelta(hours=48))
+
+
 PLEX = "http://plex:32400"
 
 
@@ -71,6 +81,7 @@ def env(tmp_path):
             ]
         )
     )
+    set_mtime(mylist, NOW)
     return {
         "SHOKO_URL": SHOKO,
         "SHOKO_API_KEY": "SHOKOSECRET",
@@ -141,7 +152,7 @@ def clients(settings):
 
 def go(env_, *, apply, limit=None, now=None, **kw):
     s = Settings.from_env(env_)
-    return run_once(s, apply=apply, limit=limit, now=now or datetime.now(UTC), clients=clients(s), **kw)
+    return run_once(s, apply=apply, limit=limit, now=now or NOW, clients=clients(s), **kw)
 
 
 @respx.mock
@@ -193,7 +204,8 @@ def test_failed_write_recorded_and_exit_code_2(env, monkeypatch, capsys):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv("DATA_DIR", env["DATA_DIR"] + "2")
-    monkeypatch.setattr(cli, "run_once", lambda s, **kw: run_once(s, clients=clients(s), **kw))
+    # the CLI passes the wall clock; pin it so the snapshot (mtime NOW) is fresh
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: run_once(s, clients=clients(s), **{**kw, "now": NOW}))
     assert cli.main(["apply"]) == 2
     assert "SHOKOSECRET" not in capsys.readouterr().out
 
@@ -212,8 +224,7 @@ def test_snapshot_unavailable_no_actions(env, capsys):
 @respx.mock
 def test_stale_snapshot_defers_r2_but_not_r1(env):
     scrobble, put = mock_servers()
-    old = time.time() - 48 * 3600
-    os.utime(env["MYLIST_PATH"], (old, old))
+    make_stale(env)
     res = go(env, apply=True)
     assert scrobble.call_count == 2 and put.call_count == 0
     assert res.counts == {"applied": 2, "reported": 1}
@@ -266,6 +277,7 @@ def test_config_error_exit_1(monkeypatch, capsys):
 def write_mylist(env_, rows):
     with open(env_["MYLIST_PATH"], "w") as fh:
         json.dump(rows, fh)
+    set_mtime(env_["MYLIST_PATH"], NOW)
 
 
 R1_TIME = datetime(2026, 3, 1, 12, tzinfo=UTC)
@@ -354,8 +366,7 @@ def test_rules_filter_lets_canary_reach_r2(env):
 @respx.mock
 def test_file_id_filter_and_reports_still_listed(env):
     scrobble, put = mock_servers()
-    old = time.time() - 48 * 3600
-    os.utime(env["MYLIST_PATH"], (old, old))  # stale: the R2 becomes a report
+    make_stale(env)  # stale: the R2 becomes a report
     res = go(env, apply=True, file_id=3)
     assert scrobble.call_count == 0 and put.call_count == 0
     assert res.counts == {"reported": 1}
@@ -388,8 +399,7 @@ def test_cli_rules_and_file_id_flags(env, monkeypatch):
 def test_ledger_holds_only_writes_and_dry_run_is_uncapped(env):
     mock_servers()
     env["MAX_WRITES"] = "1"
-    old = time.time() - 48 * 3600
-    os.utime(env["MYLIST_PATH"], (old, old))  # one REPORT row
+    make_stale(env)  # one REPORT row
     res = go(env, apply=False)
     assert res.counts == {"dry_run": 2, "reported": 1}
     db = Path(env["DATA_DIR"]) / "ledger.sqlite"
@@ -677,10 +687,8 @@ def test_stop_event_unset_changes_nothing(env):
 @respx.mock
 def test_future_snapshot_mtime_is_stale(env):
     mock_servers()
-    now = datetime.now(UTC)
-    future = (now + timedelta(hours=2)).timestamp()
-    os.utime(env["MYLIST_PATH"], (future, future))
-    res = go(env, apply=True, now=now)
+    set_mtime(env["MYLIST_PATH"], NOW + timedelta(hours=2))
+    res = go(env, apply=True)
     assert res.snapshot == "stale"
 
 
