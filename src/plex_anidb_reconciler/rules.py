@@ -8,6 +8,8 @@ from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, PlexI
 from plex_anidb_reconciler.mylist import MyListIndex
 from plex_anidb_reconciler.paths import Ambiguous, PathMatcher
 
+R2B_POLICIES = ("record", "ignore")
+
 
 class _Watched:
     """The MyList snapshot plus watches the reconciler has written (ledger) or is about to write
@@ -167,7 +169,8 @@ def _merge(actions: list[Action]) -> tuple[list[Action], dict[int, Action]]:
             if a.file_id is None or a.when is None:
                 raise ValueError("SET action without file_id or date")
             cur = best_set.get(a.file_id)
-            if cur is None or cur.when is None or a.when < cur.when:
+            # earliest date wins; equal dates go to the smallest rating key (independent of input order)
+            if cur is None or cur.when is None or (a.when, a.rating_key or "") < (cur.when, cur.rating_key or ""):
                 best_set[a.file_id] = a
         elif a.kind is ActionKind.MARK_PLEX_PLAYED:
             if a.rating_key not in seen_r1:
@@ -204,6 +207,8 @@ def plan(
 ) -> list[Action]:
     """r1_marked: rating keys the reconciler already marked played (R1); their lastViewedAt is never
     used as a date. pending: SETs already applied that the snapshot may not show yet."""
+    if r2b_policy not in R2B_POLICIES:
+        raise ValueError("r2b_policy must be 'record' or 'ignore'")
     pending = list(pending)
     r1_state = _Watched(mylist, pending)
     committed: list[Action] = []

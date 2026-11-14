@@ -524,3 +524,18 @@ def test_multi_episode_file_with_matching_eids_sets():
     sc = simple(files=[shoko(1, 12345, [50, 51], "/p/x.mkv")], entries=[entry(12345, 51, None)], history={"a": [T1]})
     (a,) = sc.run()
     assert (a.rule, a.eids) == ("R2", (50, 51))
+
+
+def test_set_dedupe_tie_breaks_on_smallest_rating_key_regardless_of_order():
+    files = [ShokoFile(1, 12345, (50,), False, ("/p/x.mkv", "/p2/x.mkv"), T0)]
+    a = item("a", "/p/x.mkv", last=T2)
+    b = item("b", "/p2/x.mkv", section=5, last=T2)
+    for items in ([a, b], [b, a]):
+        sc = Scenario(items=items, files=files, entries=[entry(12345, 50, None)], history={"a": [T1], "b": [T1]})
+        (s,) = sets(sc.run())
+        assert (s.rating_key, s.when) == ("a", T1)
+
+
+def test_plan_rejects_unknown_r2b_policy():
+    with pytest.raises(ValueError, match="r2b_policy"):
+        Scenario(**{**s_new_watch().__dict__, "policy": "recrod"}).run()
