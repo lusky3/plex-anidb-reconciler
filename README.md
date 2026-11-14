@@ -83,7 +83,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on pull requests and pushes to 
 
 ## Accepted risks
 
-- **R2 credits the earliest Plex play to the current file (ruling 10).** Plex history has no file identity.
+- **R2 credits the earliest Plex play to the current file.** Plex history has no file identity.
   R2 writes the earliest owner play (or `lastViewedAt`) of a Plex item to the Shoko file behind that item now,
   even if the play was of an older file of that episode that AniDB never recorded. R2b (episode already
   watched via another file) only counts plays after both the AniDB date and the current file's import time.
