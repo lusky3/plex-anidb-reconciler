@@ -511,3 +511,25 @@ def test_dependent_r2b_dry_run_follows_prerequisite(env):
     assert set_rows(go(env, apply=False, rules=frozenset({"R2b"}))) == [
         ("R2b", "1", "skipped", "prerequisite_not_applied")
     ]
+
+
+@respx.mock
+def test_shoko_index_cache_tied_to_shoko_url(env):
+    mock_servers()
+    route = mock_servers.index
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    cache_path = Path(env["DATA_DIR"]) / "shoko_index.json"
+    go(env, apply=False, now=now)
+    cache = json.loads(cache_path.read_text())
+    assert cache["shoko_url"] == SHOKO
+    cache["shoko_url"] = "http://other-shoko:8111"
+    cache_path.write_text(json.dumps(cache))
+    go(env, apply=False, now=now.replace(minute=10))
+    assert route.call_count == 2  # different server: refetched
+    cache = json.loads(cache_path.read_text())
+    del cache["shoko_url"]  # cache from an older version
+    cache_path.write_text(json.dumps(cache))
+    go(env, apply=False, now=now.replace(minute=20))
+    assert route.call_count == 3
+    go(env, apply=False, now=now.replace(minute=30))
+    assert route.call_count == 3  # same server, within TTL: cached

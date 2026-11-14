@@ -73,14 +73,19 @@ def _shoko_index(settings: Settings, shoko: ShokoClient, now: datetime) -> list[
     try:
         data = json.loads(cache.read_text(encoding="utf-8"))
         fetched = datetime.fromisoformat(data["fetched_at"])
-        if timedelta(0) <= now - fetched < timedelta(minutes=settings.shoko_index_ttl_min):
+        same_server = data.get("shoko_url") == settings.shoko_url  # a cache from another server is never reused
+        if same_server and timedelta(0) <= now - fetched < timedelta(minutes=settings.shoko_index_ttl_min):
             return [_file_from_json(d) for d in data["files"]]
-    except OSError, ValueError, KeyError, TypeError:
+    except OSError, ValueError, KeyError, TypeError, AttributeError:
         pass
     files = shoko.list_files()
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"fetched_at": now.isoformat(), "files": [_file_to_json(f) for f in files]}
+        payload = {
+            "shoko_url": settings.shoko_url,
+            "fetched_at": now.isoformat(),
+            "files": [_file_to_json(f) for f in files],
+        }
         cache.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
