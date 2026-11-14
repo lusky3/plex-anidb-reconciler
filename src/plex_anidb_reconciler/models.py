@@ -95,3 +95,12 @@ class PendingWatch:
     fid: int | None
     eids: tuple[int, ...]
     when: datetime
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What happened to one planned action in a run (one CSV row)."""
+
+    action: Action
+    status: Status
+    detail: str = ""

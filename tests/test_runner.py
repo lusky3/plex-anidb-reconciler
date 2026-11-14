@@ -13,6 +13,7 @@ import respx
 
 from plex_anidb_reconciler import cli
 from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.models import Action, ActionKind
 from plex_anidb_reconciler.runner import build_clients, run_once
 
 
@@ -681,3 +682,37 @@ def test_future_snapshot_mtime_is_stale(env):
     os.utime(env["MYLIST_PATH"], (future, future))
     res = go(env, apply=True, now=now)
     assert res.snapshot == "stale"
+
+
+# --- programming errors are raised, not recorded as failed writes ---
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"kind": ActionKind.MARK_PLEX_PLAYED, "rule": "R1", "rating_key": None},
+        {"kind": ActionKind.SET_FILE_WATCHED, "rule": "R2", "rating_key": "a", "file_id": None, "when": R1_TIME},
+        {"kind": ActionKind.SET_FILE_WATCHED, "rule": "R2", "rating_key": "a", "file_id": 1, "when": None},
+        {"kind": ActionKind.REPORT, "rule": "R4", "rating_key": "a"},
+    ],
+    ids=["r1_no_rating_key", "set_no_file_id", "set_no_date", "report"],
+)
+def test_execute_rejects_invalid_action(action):
+    from plex_anidb_reconciler.runner import _execute
+
+    full = {"file_id": None, "fid": None, "eids": (), "when": None, "reason": "x", **action}
+    with pytest.raises(ValueError):
+        _execute(Action(**full), clients=None)
+
+
+@respx.mock
+def test_corrupt_shoko_index_cache_logged_at_debug(env, caplog):
+    mock_servers()
+    cache = Path(env["DATA_DIR"]) / "shoko_index.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("{not json SHOKOSECRET")
+    with caplog.at_level("DEBUG", logger="plex_anidb_reconciler.runner"):
+        go(env, apply=False)
+    assert "shoko index cache not used (JSONDecodeError)" in caplog.text
+    assert "SHOKOSECRET" not in caplog.text
+    assert mock_servers.index.call_count == 1

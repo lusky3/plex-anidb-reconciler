@@ -1,4 +1,4 @@
-from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.models import Action, ActionKind, Outcome
 from plex_anidb_reconciler.report import prune_reports, summarize
 
 
@@ -22,13 +22,13 @@ def _act(kind, rule, reason):
 def test_summary_splits_reports_by_reason_and_writes_by_status():
     rep = ActionKind.REPORT
     rows = [
-        (_act(rep, "R4", "no_shoko_match"), "reported", ""),
-        (_act(rep, "R4", "no_shoko_match"), "reported", ""),
-        (_act(rep, "R4", "fallback_match"), "reported", ""),
-        (_act(rep, "R2b", "no_playback"), "reported", ""),
-        (_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "dry_run", ""),
-        (_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "capped", ""),
-        (_act(ActionKind.MARK_PLEX_PLAYED, "R1", "anidb_episode_watched"), "dry_run", ""),
+        Outcome(_act(rep, "R4", "no_shoko_match"), "reported"),
+        Outcome(_act(rep, "R4", "no_shoko_match"), "reported"),
+        Outcome(_act(rep, "R4", "fallback_match"), "reported"),
+        Outcome(_act(rep, "R2b", "no_playback"), "reported"),
+        Outcome(_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "dry_run"),
+        Outcome(_act(ActionKind.SET_FILE_WATCHED, "R2", "new_watch"), "capped"),
+        Outcome(_act(ActionKind.MARK_PLEX_PLAYED, "R1", "anidb_episode_watched"), "dry_run"),
     ]
     assert summarize(rows).splitlines() == [
         "R1 dry_run: 1",
