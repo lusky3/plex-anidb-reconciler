@@ -620,3 +620,33 @@ def test_r2b_needing_two_planned_r2s_is_reported():
     assert [(a.rule, a.reason, a.file_id) for a in acts if a.kind is ActionKind.REPORT] == [
         ("R2b", "multiple_prerequisites", 9)
     ]
+
+
+# --- G1: a parent-dir+filename fallback never drives a write ---
+
+
+def _fallback(views=1, entries=(), history=None):
+    """Plex 'Show B' episode whose only Shoko hit is 'Show A' with the same parent dir and filename."""
+    return Scenario(
+        items=[item("a", "/plex/Show B/Season 01/01.mkv", views=views, last=T2)],
+        files=[shoko(1, 12345, [50], "/shoko/Show A/Season 01/01.mkv")],
+        entries=list(entries),
+        history=history or {},
+    )
+
+
+def test_fallback_match_never_sets_only_reports_candidate():
+    acts = _fallback(entries=[entry(12345, 50, None)], history={"a": [T1]}).run()
+    assert [(a.kind, a.rule, a.reason, a.file_id) for a in acts] == [(ActionKind.REPORT, "R4", "fallback_match", 1)]
+
+
+def test_fallback_match_never_marks_plex_played():
+    acts = _fallback(views=0, entries=[entry(999, 50, T1)]).run()
+    assert [(a.kind, a.rule, a.reason, a.file_id) for a in acts] == [(ActionKind.REPORT, "R4", "fallback_match", 1)]
+
+
+def test_exact_match_unaffected():
+    (a,) = s_new_watch().run()
+    assert (a.kind, a.rule, a.file_id) == (ActionKind.SET_FILE_WATCHED, "R2", 1)
+    (r1,) = s_reupload().run()
+    assert r1.kind is ActionKind.MARK_PLEX_PLAYED

@@ -35,7 +35,7 @@ The image is hardened: a distroless runtime (`gcr.io/distroless/cc-debian13`: gl
 | `PLEX_SECTIONS` | `4,5` | Comma-separated positive Plex library section ids (must not be empty) |
 | `MYLIST_PATH` | `/mylist/mylist.json` | AniDB MyList snapshot |
 | `DATA_DIR` | `/data` | State directory |
-| `PATH_MAP` | empty | `plexprefix=shokoprefix[;...]` |
+| `PATH_MAP` | empty | `plexprefix=shokoprefix[;...]`. A rewritten Plex path must equal a Shoko absolute path; a match on parent folder + filename only is reported as R4 `fallback_match` and never written |
 | `R2B_POLICY` | `record` | `record` or `ignore` |
 | `SNAPSHOT_MAX_AGE_H` | `26` | Max snapshot age in hours for write rules (>= 1) |
 | `MAX_WRITES` | `500` | Apply cap per run (>= 1) |

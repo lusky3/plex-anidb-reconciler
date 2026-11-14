@@ -6,7 +6,7 @@ from datetime import datetime
 
 from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, PlexItem, ShokoFile
 from plex_anidb_reconciler.mylist import MyListIndex
-from plex_anidb_reconciler.paths import Ambiguous, PathMatcher
+from plex_anidb_reconciler.paths import Ambiguous, Match, PathMatcher
 
 R2B_POLICIES = ("record", "ignore")
 
@@ -74,28 +74,33 @@ def _set(rule: str, reason: str, rk: str, f: ShokoFile, when: datetime, depends_
     return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason, depends_on)
 
 
-def _resolve(item: PlexItem, matcher: PathMatcher) -> list[ShokoFile] | Action:
-    """The Shoko files behind a Plex item, or the R4 report explaining why there are none usable.
+def _resolve(item: PlexItem, matcher: PathMatcher) -> list[Match] | tuple[Action, ...]:
+    """The Shoko files behind a Plex item, or the R4 reports explaining why there are none usable.
     Independent of watch state, so plan() resolves each item once."""
     rk = item.rating_key
-    matches = [matcher.match(p) for p in item.paths]
-    if any(m is None for m in matches):
-        return _report("R4", "no_shoko_match", rk)
-    if any(isinstance(m, Ambiguous) for m in matches):
-        return _report("R4", "ambiguous_path", rk)
-    files: list[ShokoFile] = [m for m in matches if isinstance(m, ShokoFile)]
+    found = [matcher.lookup(p) for p in item.paths]
+    if any(m is None for m in found):
+        return (_report("R4", "no_shoko_match", rk),)
+    if any(isinstance(m, Ambiguous) for m in found):
+        return (_report("R4", "ambiguous_path", rk),)
+    matches: list[Match] = [m for m in found if isinstance(m, Match)]
+    fallback = {m.file.file_id: m.file for m in matches if m.path is None}
+    if fallback:
+        # parent-dir + filename only: may be another show's same-named episode, so never act on it
+        return tuple(_report("R4", "fallback_match", rk, f) for f in fallback.values())
+    files = [m.file for m in matches]
     if not files or any(f.fid is None for f in files):
-        return _report("R4", "unrecognised", rk)
+        return (_report("R4", "unrecognised", rk),)
     if any(f.manual_link for f in files):
-        return _report("R4", "manual_link", rk)
+        return (_report("R4", "manual_link", rk),)
     if any(not f.eids for f in files):
-        return _report("R4", "no_episodes", rk)
-    return files
+        return (_report("R4", "no_episodes", rk),)
+    return matches
 
 
 def _plan_item(
     item: PlexItem,
-    resolved: list[ShokoFile] | Action,
+    resolved: list[Match] | tuple[Action, ...],
     history: dict[str, list[datetime]],
     r1_state: _Watched,
     mylist: _Watched,
@@ -105,10 +110,10 @@ def _plan_item(
 ) -> list[Action]:
     """r1_state drives R1 (snapshot + applied writes only); mylist drives R2/R2b and also includes
     SETs planned earlier in this same plan() call."""
-    if isinstance(resolved, Action):
-        return [resolved]
+    if isinstance(resolved, tuple):
+        return list(resolved)
     rk = item.rating_key
-    files = resolved
+    files = [m.file for m in resolved]
     eids = tuple(sorted({e for f in files for e in f.eids}))
 
     if item.view_count == 0:

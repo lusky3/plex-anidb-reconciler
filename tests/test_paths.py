@@ -1,5 +1,5 @@
 from plex_anidb_reconciler.models import ShokoFile
-from plex_anidb_reconciler.paths import Ambiguous, PathMatcher
+from plex_anidb_reconciler.paths import Ambiguous, Match, PathMatcher
 
 
 def sf(file_id, *paths):
@@ -62,3 +62,23 @@ def test_no_match_returns_none():
 def test_duplicate_exact_path_is_ambiguous():
     a, b = sf(7, "/mnt/media/TV/A/x.mkv"), sf(3, "/mnt/media/TV/A/x.mkv")
     assert PathMatcher([a, b], []).match("/mnt/media/TV/A/x.mkv") == Ambiguous((3, 7))
+
+
+# --- G1: lookup() says whether a hit was exact (after PATH_MAP) or the parent+filename fallback ---
+
+
+def test_lookup_exact_hit_carries_shoko_path():
+    f = sf(1, "/mnt/media/TV/A/Season 01/x.mkv")
+    assert PathMatcher([f], MAP).lookup("/data/TV/A/Season 01/x.mkv") == Match(f, "/mnt/media/TV/A/Season 01/x.mkv")
+
+
+def test_lookup_fallback_hit_has_no_path():
+    show_a = sf(1, "/mnt/media/TV/Show A/Season 01/01.mkv")
+    assert PathMatcher([show_a], MAP).lookup("/data/TV/Show B/Season 01/01.mkv") == Match(show_a, None)
+
+
+def test_lookup_none_and_ambiguous_unchanged():
+    a, b = sf(5, "/r1/Season 01/x.mkv"), sf(3, "/r2/Season 01/x.mkv")
+    m = PathMatcher([a, b], MAP)
+    assert m.lookup("/nowhere/Season 01/x.mkv") == Ambiguous((3, 5))
+    assert m.lookup("/nowhere/Season 02/y.mkv") is None

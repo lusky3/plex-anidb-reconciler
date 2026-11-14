@@ -11,6 +11,16 @@ class Ambiguous:
     candidates: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class Match:
+    """One Shoko file for a Plex path. ``path`` is the Shoko absolute path the PATH_MAP-rewritten Plex
+    path equals exactly; ``None`` means the hit came only from the parent-dir + filename fallback, which
+    can pick the same-named episode of another show, so it must never drive a write."""
+
+    file: ShokoFile
+    path: str | None
+
+
 def _key(path: str) -> str:
     parts = [p for p in path.split("/") if p]
     return "/".join(parts[-2:]).casefold()
@@ -32,10 +42,16 @@ class PathMatcher:
                 return dst + path[len(src) :]
         return path
 
-    def match(self, plex_path: str) -> ShokoFile | Ambiguous | None:
-        cands = self._exact.get(self._rewrite(plex_path)) or self._by_key.get(_key(plex_path), {})
-        if len(cands) == 1:
-            return next(iter(cands.values()))
+    def lookup(self, plex_path: str) -> Match | Ambiguous | None:
+        rewritten = self._rewrite(plex_path)
+        exact = self._exact.get(rewritten)
+        cands = exact or self._by_key.get(_key(plex_path), {})
         if len(cands) > 1:
             return Ambiguous(tuple(sorted(cands)))
-        return None
+        if not cands:
+            return None
+        return Match(next(iter(cands.values())), rewritten if exact else None)
+
+    def match(self, plex_path: str) -> ShokoFile | Ambiguous | None:
+        found = self.lookup(plex_path)
+        return found.file if isinstance(found, Match) else found
