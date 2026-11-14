@@ -16,6 +16,9 @@ services:
       PLEX_SECTIONS: "4,5"
       SHOKO_TZ: America/New_York
       R2B_POLICY: record
+      # Plex and Shoko see the files under different prefixes: plexprefix=shokoprefix[;...]
+      # (see docs/runbook.md step 5).
+      # PATH_MAP: /data/TV=/mnt/media/TV
       # Secrets come from Doppler (project `misc`, config `dev` holds SHOKO_API_KEY),
       # e.g. `doppler run -- docker compose up -d`.
       SHOKO_API_KEY: ${SHOKO_API_KEY}

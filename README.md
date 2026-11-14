@@ -7,10 +7,13 @@ Status: work in progress. Dry-run by default; writes only with `--apply`.
 ## Usage
 
 ```
-pxar plan              # dry run, writes a CSV report
-pxar apply [--limit N] # apply changes (capped by MAX_WRITES)
-pxar serve             # periodic runs plus POST /trigger on LISTEN
+pxar plan  [--rules R1,R2,R2b] [--file-id N]             # dry run (uncapped), writes a CSV report
+pxar apply [--rules R1,R2,R2b] [--file-id N] [--limit N] # apply changes (capped by MAX_WRITES)
+pxar serve                                                # periodic runs plus POST /trigger on LISTEN
 ```
+
+`--rules` and `--file-id` restrict which writes run; reports are always listed. `apply` runs R1 before
+R2/R2b, so a canary write to AniDB is `pxar apply --rules R2 --limit 1`.
 
 ## Docker
 
@@ -35,3 +38,15 @@ Build with `docker build -t pxar .`; the image runs `pxar serve` by default. See
 | `POLL_MINUTES` | `15` | Poll interval |
 | `SHOKO_INDEX_TTL_MIN` | `60` | Shoko index cache TTL |
 | `LISTEN` | `0.0.0.0:8787` | Listen address |
+
+## Accepted risks
+
+- **R2 credits the earliest Plex play to the current file (ruling 10).** Plex history has no file identity.
+  R2 writes the earliest owner play (or `lastViewedAt`) of a Plex item to the Shoko file behind that item now,
+  even if the play was of an older file of that episode that AniDB never recorded. R2b (episode already
+  watched via another file) only counts plays after both the AniDB date and the current file's import time.
+- **Snapshot freshness.** R2/R2b trust `mylist.json` up to `SNAPSHOT_MAX_AGE_H` (26 h) old. An episode first
+  watched through another AniDB client inside that window can get a second dated MyList entry for the file
+  watched in Plex.
+- **`/trigger` is unauthenticated.** It only queues a run, but anyone who can reach port 8787 can trigger one.
+  Keep the port unpublished and reachable on the docker network only.
