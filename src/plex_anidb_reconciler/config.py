@@ -1,7 +1,7 @@
 """Environment-driven settings. Error messages never include values."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN")
@@ -39,9 +39,9 @@ def _parse_path_map(raw: str) -> list[tuple[str, str]]:
 @dataclass(frozen=True)
 class Settings:
     shoko_url: str
-    shoko_api_key: str
+    shoko_api_key: str = field(repr=False)
     plex_url: str
-    plex_token: str
+    plex_token: str = field(repr=False)
     shoko_tz: ZoneInfo
     plex_sections: list[int]
     mylist_path: str

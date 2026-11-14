@@ -50,3 +50,9 @@ def test_overrides():
     assert s.plex_sections == [1, 2]
     assert s.shoko_tz.key == "UTC"
     assert s.max_writes == 5
+
+
+def test_repr_hides_secrets():
+    text = repr(Settings.from_env(BASE))
+    assert BASE["SHOKO_API_KEY"] not in text
+    assert BASE["PLEX_TOKEN"] not in text
