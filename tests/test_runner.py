@@ -557,3 +557,63 @@ def test_cli_accepts_zero_limit(env, monkeypatch):
     monkeypatch.setattr(cli, "run_once", fake)
     assert cli.main(["apply", "--limit", "0"]) == 0
     assert seen["limit"] == 0
+
+
+# --- secrets never reach stdout or stderr ---
+
+SECRETS = ("SHOKOSECRET", "PLEXSECRET")
+
+
+def assert_no_secrets(captured):
+    for secret in SECRETS:
+        assert secret not in captured.out and secret not in captured.err
+
+
+def test_config_error_output_has_no_secrets(env, monkeypatch, capsys):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("MAX_WRITES", "PLEXSECRET")
+    assert cli.main(["plan"]) == 1
+    captured = capsys.readouterr()
+    assert "MAX_WRITES" in captured.err
+    assert_no_secrets(captured)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        lambda: __import__("plex_anidb_reconciler.shoko", fromlist=["x"]).ShokoError(
+            "GET /api/v3/File returned HTTP 500"
+        ),
+        lambda: __import__("plex_anidb_reconciler.plex", fromlist=["x"]).PlexError(
+            "GET /:/scrobble failed: ConnectError"
+        ),
+        lambda: RuntimeError("apikey=SHOKOSECRET X-Plex-Token=PLEXSECRET"),
+    ],
+    ids=["shoko", "plex", "unexpected"],
+)
+def test_run_failure_output_has_no_secrets(env, monkeypatch, capsys, exc):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    def boom(s, **kw):
+        raise exc()
+
+    monkeypatch.setattr(cli, "run_once", boom)
+    assert cli.main(["apply"]) == 2
+    captured = capsys.readouterr()
+    assert "run failed" in captured.err
+    assert_no_secrets(captured)
+
+
+@respx.mock
+def test_real_client_failures_have_no_secrets(env, monkeypatch, capsys):
+    """End to end through the real clients: transport error carrying the secrets in its text."""
+    respx.get(f"{SHOKO}/api/v3/File").mock(side_effect=httpx.ConnectError("SHOKOSECRET PLEXSECRET"))
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: run_once(s, clients=clients(s), **kw))
+    assert cli.main(["plan"]) == 2
+    captured = capsys.readouterr()
+    assert "ConnectError" in captured.err
+    assert_no_secrets(captured)

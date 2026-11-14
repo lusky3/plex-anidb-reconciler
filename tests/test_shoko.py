@@ -160,3 +160,24 @@ def test_transport_error_hides_details():
         make_client().list_files()
     assert "SECRETKEY" not in str(exc.value)
     assert "ConnectError" in str(exc.value)
+
+
+def test_to_shoko_time_summer_uses_edt_offset():
+    assert to_shoko_time(datetime(2023, 7, 4, 16, 30, 15, 500, tzinfo=UTC), NY) == "2023-07-04T12:30:15-04:00"
+
+
+@pytest.mark.parametrize(
+    "utc,expected",
+    [
+        # spring forward 2023-03-12: 02:00 EST -> 03:00 EDT
+        (datetime(2023, 3, 12, 6, 59, 59, tzinfo=UTC), "2023-03-12T01:59:59-05:00"),
+        (datetime(2023, 3, 12, 7, 0, 0, tzinfo=UTC), "2023-03-12T03:00:00-04:00"),
+        # fall back 2023-11-05: 01:xx occurs twice; the offset disambiguates
+        (datetime(2023, 11, 5, 5, 30, tzinfo=UTC), "2023-11-05T01:30:00-04:00"),
+        (datetime(2023, 11, 5, 6, 30, tzinfo=UTC), "2023-11-05T01:30:00-05:00"),
+    ],
+)
+def test_to_shoko_time_across_dst_transitions(utc, expected):
+    stamp = to_shoko_time(utc, NY)
+    assert stamp == expected
+    assert datetime.fromisoformat(stamp) == utc  # same instant
