@@ -134,14 +134,24 @@ def test_snapshot_age_missing_file_raises_snapshot_error(tmp_path):
         snapshot_age(tmp_path / "gone.json", datetime(2024, 1, 1, tzinfo=UTC))
 
 
-def test_snapshot_age_future_mtime_clamped_to_zero(tmp_path):
+def test_snapshot_age_future_mtime_is_negative(tmp_path):
     from plex_anidb_reconciler.mylist import snapshot_age
 
     p = tmp_path / "m.json"
     p.write_text("[]")
     mtime = datetime(2024, 1, 1, 12, tzinfo=UTC)
     os.utime(p, (mtime.timestamp(), mtime.timestamp()))
-    assert snapshot_age(p, mtime - timedelta(hours=3)) == timedelta(0)
+    assert snapshot_age(p, mtime - timedelta(hours=3)) == timedelta(hours=3).__neg__()
+
+
+def test_snapshot_is_fresh_rejects_far_future_but_allows_small_skew():
+    from plex_anidb_reconciler.mylist import snapshot_is_fresh
+
+    max_age = timedelta(hours=26)
+    assert snapshot_is_fresh(timedelta(hours=1), max_age)
+    assert snapshot_is_fresh(timedelta(minutes=-4), max_age)  # small clock skew
+    assert not snapshot_is_fresh(timedelta(minutes=-6), max_age)
+    assert not snapshot_is_fresh(timedelta(hours=27), max_age)
 
 
 # --- entry types: the whole snapshot is rejected on any malformed entry (fail closed) ---
@@ -176,8 +186,6 @@ def test_numeric_strings_are_coerced_to_int(tmp_path):
         good(FileID=True),
         good(ViewedAt="yesterday"),
         good(ViewedAt=12345),
-        {k: v for k, v in good().items() if k != "State"},
-        good(State=None),
         good(State="x"),
     ],
     ids=[
@@ -189,8 +197,6 @@ def test_numeric_strings_are_coerced_to_int(tmp_path):
         "fid_bool",
         "viewed_text",
         "viewed_int",
-        "no_state",
-        "null_state",
         "state_str",
     ],
 )
@@ -200,3 +206,14 @@ def test_malformed_entry_rejects_snapshot_with_count(tmp_path, bad):
         load_mylist(p)
     assert "m.json" in str(exc.value)
     assert "1 malformed" in str(exc.value)
+
+
+@pytest.mark.parametrize("drop", [True, False])
+def test_null_or_missing_state_defaults_to_zero(tmp_path, drop):
+    entry = good()
+    if drop:
+        del entry["State"]
+    else:
+        entry["State"] = None
+    (e,) = load_mylist(write_entries(tmp_path, [entry]))
+    assert e.state == 0 and e.fid == 3 and e.eid == 2

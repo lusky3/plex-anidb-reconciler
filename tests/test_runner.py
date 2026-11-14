@@ -617,3 +617,47 @@ def test_real_client_failures_have_no_secrets(env, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "ConnectError" in captured.err
     assert_no_secrets(captured)
+
+
+@respx.mock
+def test_stop_event_stops_at_write_boundary_and_records_rest_as_skipped(env):
+    import threading
+
+    scrobble, put = mock_servers()
+    stop = threading.Event()
+
+    def first_write_sets_stop(request):
+        stop.set()  # SIGTERM arrives while the first write is in flight
+        return httpx.Response(200)
+
+    scrobble.mock(side_effect=first_write_sets_stop)
+    res = go(env, apply=True, stop=stop)
+    assert res.counts == {"applied": 1, "skipped": 2}
+    assert scrobble.call_count == 1 and put.call_count == 0  # in-flight write completed, nothing after it
+    rows = list(csv.DictReader(res.report_path.open()))
+    assert [(r["status"], r["detail"]) for r in rows] == [
+        ("applied", ""),
+        ("skipped", "shutdown"),
+        ("skipped", "shutdown"),
+    ]
+    # next run (no stop) picks up the remainder
+    res2 = go(env, apply=True)
+    assert res2.counts == {"skipped_ledger": 1, "applied": 2}
+
+
+@respx.mock
+def test_stop_event_unset_changes_nothing(env):
+    import threading
+
+    mock_servers()
+    assert go(env, apply=True, stop=threading.Event()).counts == {"applied": 3}
+
+
+@respx.mock
+def test_future_snapshot_mtime_is_stale(env):
+    mock_servers()
+    now = datetime.now(UTC)
+    future = (now + timedelta(hours=2)).timestamp()
+    os.utime(env["MYLIST_PATH"], (future, future))
+    res = go(env, apply=True, now=now)
+    assert res.snapshot == "stale"

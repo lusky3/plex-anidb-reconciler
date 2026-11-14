@@ -48,14 +48,12 @@ def _opt_int(raw: dict, name: str) -> int | None:
 def _parse_entry(raw: object) -> MyListEntry:
     if not isinstance(raw, dict):
         raise _BadEntry("entry is not an object")
-    if raw.get("State") is None:
-        raise _BadEntry("State is missing")
     return MyListEntry(
         fid=_opt_int(raw, "FileID") or None,  # FileID 0 = generic entry (no file)
         eid=_opt_int(raw, "EpisodeID"),
         aid=_opt_int(raw, "AnimeID"),
         viewed_at=_parse_viewed_at(raw.get("ViewedAt")),
-        state=_as_int(raw["State"], "State"),
+        state=_opt_int(raw, "State") or 0,  # informational only: never used for decisions
     )
 
 
@@ -90,13 +88,22 @@ def load_mylist(path: Path) -> list[MyListEntry]:
     return entries
 
 
+FUTURE_SKEW = timedelta(minutes=5)  # tolerated clock skew between the Shoko host and this one
+
+
+def snapshot_is_fresh(age: timedelta, max_age: timedelta) -> bool:
+    """Fresh = not older than max_age and not (beyond skew) in the future: a bogus future mtime must not
+    pass as fresh forever."""
+    return -FUTURE_SKEW <= age < max_age
+
+
 def snapshot_age(path: Path, now: datetime) -> timedelta:
-    """Age of the snapshot by mtime. A future mtime (clock skew between hosts) counts as age zero."""
+    """Signed age of the snapshot by mtime (negative: mtime is in the future)."""
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=now.tzinfo)
     except OSError as exc:
         raise SnapshotError(f"{path}: cannot stat snapshot ({exc.strerror or type(exc).__name__})") from exc
-    return max(now - mtime, timedelta(0))
+    return now - mtime
 
 
 class MyListIndex:

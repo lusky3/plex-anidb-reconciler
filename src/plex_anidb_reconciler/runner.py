@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ import httpx
 from plex_anidb_reconciler.config import Settings
 from plex_anidb_reconciler.ledger import Ledger
 from plex_anidb_reconciler.models import Action, ActionKind, ShokoFile
-from plex_anidb_reconciler.mylist import MyListIndex, SnapshotError, load_mylist, snapshot_age
+from plex_anidb_reconciler.mylist import MyListIndex, SnapshotError, load_mylist, snapshot_age, snapshot_is_fresh
 from plex_anidb_reconciler.paths import PathMatcher
 from plex_anidb_reconciler.plex import PlexClient, PlexError
 from plex_anidb_reconciler.report import prune_reports, summarize, write_report
@@ -148,9 +149,11 @@ def run_once(
     clients: Clients | None = None,
     rules: frozenset[str] | None = None,
     file_id: int | None = None,
+    stop: threading.Event | None = None,
 ) -> RunResult:
     """rules/file_id restrict which executable actions (R1/R2/R2b) run; reports are always listed.
-    Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
+    Once ``stop`` is set (shutdown), no further write starts: the remaining executable actions are recorded
+    as skipped/shutdown (an in-flight write completes and is recorded first). Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
     run_id = _new_run_id(now)
     report_path = Path(settings.data_dir) / "reports" / f"{run_id}.csv"
 
@@ -163,7 +166,7 @@ def run_once(
         print("snapshot_unavailable: no actions planned")
         log.warning("run %s: MyList snapshot unavailable, no actions planned", run_id)
         return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, "unavailable")
-    fresh = age < timedelta(hours=settings.snapshot_max_age_h)
+    fresh = snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h))
 
     own_http = None
     if clients is None:
@@ -206,6 +209,8 @@ def run_once(
                     status, detail = "skipped", "prerequisite_not_applied"  # CSV only; reconsidered next run
                 elif not apply:
                     status = "dry_run"
+                elif stop is not None and stop.is_set():
+                    status, detail = "skipped", "shutdown"  # CSV only; re-planned next run
                 elif budget <= 0:
                     status = "capped"
                 else:
