@@ -295,3 +295,25 @@ def test_missing_series_and_group_are_none():
     )
     (f,) = make_client().list_files()
     assert (f.aid, f.release_group) == (None, None)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "series_id,aid",
+    [
+        ("not-a-dict", None),
+        ([1, 2], None),
+        ({"AniDB": True}, None),
+        ({"AniDB": "abc"}, None),
+        ({"AniDB": 1.5}, None),
+        ({"AniDB": None}, None),
+        ({"AniDB": "42"}, 42),
+        ({"AniDB": 42}, 42),
+    ],
+    ids=["str", "list", "bool", "non_numeric", "float", "null", "numeric_str", "int"],
+)
+def test_report_aid_parsed_defensively(series_id, aid):
+    raw = {"ID": 9, "AniDB": {"ID": 1}, "SeriesIDs": [{"SeriesID": series_id, "EpisodeIDs": [{"AniDB": 50}]}]}
+    respx.get(f"{BASE}/api/v3/File").mock(return_value=httpx.Response(200, json={"List": [raw]}))
+    (f,) = make_client().list_files()
+    assert (f.aid, f.eids, f.fid) == (aid, (50,), 1)
