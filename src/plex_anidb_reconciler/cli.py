@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from plex_anidb_reconciler.config import Settings
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import EXECUTABLE_RULES, run_once
-from plex_anidb_reconciler.serve import serve
+from plex_anidb_reconciler.serve import healthcheck, serve
 from plex_anidb_reconciler.shoko import ShokoError
 
 
@@ -44,6 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("apply", help="apply changes (capped by MAX_WRITES)")
     ap.add_argument("--limit", type=_limit, default=None, help="maximum writes this run")
     _add_filters(ap)
+    sub.add_parser("healthcheck", help="container probe: exit 0 iff the local /healthz answers 200")
     sub.add_parser("serve", help="run the scheduled service and /trigger endpoint")
     return p
 
@@ -51,6 +52,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if args.command == "healthcheck":  # needs no backend settings
+        return healthcheck(os.environ)
     try:
         settings = Settings.from_env(os.environ)
     except ValueError as exc:

@@ -10,7 +10,8 @@ import logging
 import signal
 import socket
 import threading
-from collections.abc import Callable
+import urllib.request
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -20,6 +21,7 @@ from plex_anidb_reconciler.runner import run_once
 log = logging.getLogger(__name__)
 MAX_BODY = 1024 * 1024  # larger bodies get 413 and the connection is closed
 CHUNK = 64 * 1024
+DEFAULT_LISTEN = "0.0.0.0:8787"
 
 
 class Service:
@@ -38,18 +40,22 @@ class Service:
         self._state_lock = threading.Lock()
         self._heartbeat: datetime | None = None  # last loop iteration or finished run
         self._loop_thread: threading.Thread | None = None
+        self._stop: threading.Event | None = None  # shutdown signal, handed to every run
 
     def _beat(self) -> None:
         with self._state_lock:
             self._heartbeat = self._clock()
 
     def healthy(self) -> bool:
-        """The loop thread is alive and has beaten within 2 x POLL_MINUTES + 5 min."""
+        """The loop thread is alive and either a run is in progress (a long run is not unhealthy) or it
+        has beaten within 2 x POLL_MINUTES + 5 min."""
         with self._state_lock:
             beat = self._heartbeat
             thread = self._loop_thread
         if thread is None or not thread.is_alive() or beat is None:
             return False
+        if self._lock.locked():  # a reconcile is running; the loop beats again when it finishes
+            return True
         limit = timedelta(minutes=2 * self.settings.poll_minutes + 5)
         return self._clock() - beat <= limit
 
@@ -67,7 +73,7 @@ class Service:
             run_id = None
             snapshot = None
             try:
-                result = self._run_fn(self.settings, apply=True, limit=None, now=self._clock())
+                result = self._run_fn(self.settings, apply=True, limit=None, now=self._clock(), stop=self._stop)
                 run_id = result.run_id
                 snapshot = getattr(result, "snapshot", None)
                 status = "failed" if result.counts.get("failed") else "ok"
@@ -86,6 +92,7 @@ class Service:
         interval = max(self.settings.poll_minutes, 1) * 60
         with self._state_lock:
             self._loop_thread = threading.current_thread()
+            self._stop = stop
         while not stop.is_set():
             self._beat()
             self._event.wait(timeout=interval)  # a trigger wakes this immediately
@@ -160,6 +167,27 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
     return server_cls((host, port), Handler)
 
 
+def health_url(listen: str | None) -> str:
+    """Where the container probe should connect, derived from LISTEN (default 0.0.0.0:8787)."""
+    host, port = parse_listen(listen if listen and listen.strip() else DEFAULT_LISTEN)
+    if host in ("0.0.0.0", ""):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}/healthz"
+
+
+def healthcheck(env: Mapping[str, str]) -> int:
+    """Docker HEALTHCHECK: 0 iff /healthz answers 200. Needs no backend settings; never raises."""
+    try:
+        with urllib.request.urlopen(health_url(env.get("LISTEN")), timeout=5) as resp:
+            return 0 if resp.status == 200 else 1
+    except Exception:  # noqa: BLE001 - any failure (bad LISTEN, refused, 503, timeout) means unhealthy
+        return 1
+
+
 def finish_shutdown(loop: threading.Thread, grace_s: float) -> bool:
     """Give an in-flight run up to grace_s to finish. False (and a warning) if it is still running."""
     loop.join(timeout=grace_s)
@@ -176,7 +204,7 @@ def serve(settings: Settings) -> None:
     stop = threading.Event()
 
     def shutdown(signum, frame) -> None:
-        stop.set()
+        stop.set()  # an in-flight run also sees this and stops before its next write
         service.request_run()  # wake the loop; it exits after an in-flight run completes
         threading.Thread(target=server.shutdown, daemon=True).start()
 

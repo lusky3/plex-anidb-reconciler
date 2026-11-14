@@ -4,7 +4,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -353,12 +353,14 @@ def test_trigger_huge_content_length_413(http_svc):
     assert not svc._event.is_set()
 
 
-def test_trigger_large_body_fully_drained_keeps_connection_usable(http_svc):
+def test_trigger_large_body_fully_drained_before_response(http_svc):
     _, base = http_svc
     body = b"x" * (200 * 1024)  # > the old 64 KiB partial read, < 1 MiB
     conn, (code, _, _) = raw_post(base, "/trigger", {"Content-Length": str(len(body))}, body)
     assert code == 202
-    conn.request("GET", "/healthz")  # same keep-alive connection: the body must not leak into it
+    conn.request(
+        "GET", "/healthz"
+    )  # server is still sane after the large body (HTTP/1.0 handler: no keep-alive claimed)
     resp = conn.getresponse()
     assert resp.status in (200, 503) and "loop" in json.loads(resp.read())
     conn.close()
@@ -392,3 +394,96 @@ def test_make_server_binds_ipv6_literal():
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- heartbeat during a long run ---
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **kw):
+        self.now += timedelta(**kw)
+
+
+def test_long_run_keeps_healthz_ok_but_dead_loop_is_503():
+    clock = FakeClock()
+    gate = threading.Event()
+    started = threading.Event()
+
+    def run_fn(settings, **kw):
+        started.set()
+        gate.wait(30)
+        return FakeResult("r1", {"moved": 1})
+
+    svc = make_service(run_fn, clock=clock)
+    stop, t = start_loop(svc)
+    try:
+        svc.request_run()
+        assert started.wait(2)
+        clock.advance(hours=3)  # far beyond 2 x POLL_MINUTES + 5 min, run still in progress
+        assert svc.healthy() is True
+        gate.set()
+        assert wait_for(lambda: svc.health()["last_run_id"] == "r1")
+        assert svc.healthy() is True  # finishing the run re-beats
+        clock.advance(hours=3)  # idle and no beat for hours: stale
+        assert svc.healthy() is False
+    finally:
+        gate.set()
+        stop_loop(svc, stop, t)
+    assert svc.healthy() is False  # loop thread dead
+
+
+def test_dead_loop_thread_is_503_even_during_lock_hold():
+    svc = make_service(lambda s, **kw: FakeResult("a", {}))
+    stop, t = start_loop(svc)
+    stop_loop(svc, stop, t)
+    assert not t.is_alive()
+    with svc._lock:
+        assert svc.healthy() is False
+
+
+# --- healthcheck probe target derived from LISTEN ---
+
+
+@pytest.mark.parametrize(
+    ("listen", "url"),
+    [
+        (None, "http://127.0.0.1:8787/healthz"),
+        ("", "http://127.0.0.1:8787/healthz"),
+        ("0.0.0.0:8787", "http://127.0.0.1:8787/healthz"),
+        (":9000", "http://127.0.0.1:9000/healthz"),
+        ("[::]:8080", "http://[::1]:8080/healthz"),
+        ("[fd00::5]:8080", "http://[fd00::5]:8080/healthz"),
+        ("10.1.2.3:81", "http://10.1.2.3:81/healthz"),
+        ("  127.0.0.1:7000 ", "http://127.0.0.1:7000/healthz"),
+    ],
+)
+def test_health_url_derived_from_listen(listen, url):
+    from plex_anidb_reconciler.serve import health_url
+
+    assert health_url(listen) == url
+
+
+def test_healthcheck_exit_codes():
+    from plex_anidb_reconciler.serve import healthcheck
+
+    svc = make_service(lambda s, **kw: FakeResult("a", {}))
+    server, base = start_http(svc)
+    try:
+        listen = base.removeprefix("http://")
+        assert healthcheck({"LISTEN": listen}) == 1  # no loop yet: 503
+        stop, t = start_loop(svc)
+        try:
+            assert healthcheck({"LISTEN": listen}) == 0
+        finally:
+            stop_loop(svc, stop, t)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert healthcheck({"LISTEN": "127.0.0.1:1"}) == 1  # nothing listening
+    assert healthcheck({"LISTEN": "garbage"}) == 1  # invalid LISTEN is unhealthy, not a crash
