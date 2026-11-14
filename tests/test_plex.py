@@ -210,3 +210,44 @@ def test_history_entries_without_rating_key_do_not_trigger_stall(monkeypatch):
         ]
     )
     assert make_client().history(4) == {"5": [datetime.fromtimestamp(300, UTC)]}
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"MediaContainer": {"Metadata": {"ratingKey": "1"}}},  # Metadata not a list
+        {"MediaContainer": {"Metadata": [{"viewCount": 1}]}},  # item without ratingKey
+        {"MediaContainer": {"Metadata": ["x"]}},
+        {"MediaContainer": {"Metadata": [{"ratingKey": "1", "Media": "bad"}]}},
+        {"MediaContainer": {"Metadata": [{"ratingKey": "1", "lastViewedAt": "yesterday"}]}},
+        {"MediaContainer": "oops"},
+        [],
+    ],
+    ids=["metadata_dict", "no_rating_key", "non_object", "bad_media", "bad_last_viewed", "container_str", "list"],
+)
+def test_list_episodes_malformed_body_raises_plex_error(body):
+    respx.get(f"{BASE}/library/sections/4/all").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(PlexError, match="unexpected body") as ei:
+        make_client().list_episodes(4)
+    assert TOKEN not in str(ei.value)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "rows",
+    [[{"ratingKey": "1", "viewedAt": "soon"}], ["x"], {"ratingKey": "1"}],
+    ids=["bad_viewed_at", "non_object", "metadata_dict"],
+)
+def test_history_malformed_body_raises_plex_error(rows):
+    respx.get(f"{BASE}/status/sessions/history/all").mock(return_value=_hist_page(rows))
+    with pytest.raises(PlexError, match="unexpected body"):
+        make_client().history(4)
+
+
+@respx.mock
+def test_scrobble_non_2xx_raises_plex_error():
+    respx.get(f"{BASE}/:/scrobble").mock(return_value=httpx.Response(401))
+    with pytest.raises(PlexError, match="401") as ei:
+        make_client().mark_played("1")
+    assert TOKEN not in str(ei.value)

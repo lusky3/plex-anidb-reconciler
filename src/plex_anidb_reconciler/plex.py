@@ -17,8 +17,28 @@ class PlexError(Exception):
     """Plex request failed. Messages never contain the token."""
 
 
-def _utc(epoch: int) -> datetime:
+def _utc(epoch: object) -> datetime:
+    if isinstance(epoch, bool) or not isinstance(epoch, int | float):
+        raise TypeError("timestamp is not a number")
     return datetime.fromtimestamp(epoch, UTC)
+
+
+def _bad_body(path: str, exc: Exception) -> PlexError:
+    """Malformed 2xx body: name the exception type only (values may echo request data)."""
+    return PlexError(f"GET {path} returned an unexpected body ({type(exc).__name__})")
+
+
+def _parse_episode(m: dict, section: int) -> PlexItem:
+    if m.get("ratingKey") is None:
+        raise KeyError("ratingKey")
+    last = m.get("lastViewedAt")
+    return PlexItem(
+        rating_key=str(m["ratingKey"]),
+        section=section,
+        paths=tuple(p["file"] for media in m.get("Media") or [] for p in media.get("Part") or [] if p.get("file")),
+        view_count=int(m.get("viewCount") or 0),
+        last_viewed_at=_utc(last) if last else None,
+    )
 
 
 def _episode_sig(m: dict) -> object:
@@ -56,11 +76,18 @@ class PlexClient:
         previous: tuple | None = None
         for _ in range(MAX_PAGES):
             headers = {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(PAGE_SIZE)}
+            resp = self._request(path, params, headers)
             try:
-                container = self._request(path, params, headers).json()["MediaContainer"]
-            except ValueError, KeyError, TypeError:
-                raise PlexError(f"GET {path} returned an unexpected body") from None
-            items = container.get("Metadata") or []
+                container = resp.json()["MediaContainer"]
+                if not isinstance(container, dict):
+                    raise TypeError("MediaContainer is not an object")
+                items = container.get("Metadata") or []
+                if not isinstance(items, list):
+                    raise TypeError("Metadata is not a list")
+                total = container.get("totalSize")
+                total = None if total is None else int(total)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise _bad_body(path, exc) from None
             if not items:
                 return out
             page = tuple(signature(m) if isinstance(m, dict) else None for m in items)
@@ -69,33 +96,29 @@ class PlexClient:
             previous = page
             out.extend(items)
             start += len(items)
-            total = container.get("totalSize")
             if len(items) < PAGE_SIZE or (total is not None and start >= total):
                 return out
         raise PlexError(f"GET {path} pagination exceeded {MAX_PAGES} pages")
 
     def list_episodes(self, section: int) -> list[PlexItem]:
-        raw = self._paged(f"/library/sections/{section}/all", {"type": "4"}, _episode_sig)
-        return [
-            PlexItem(
-                rating_key=str(m["ratingKey"]),
-                section=section,
-                paths=tuple(
-                    p["file"] for media in m.get("Media") or [] for p in media.get("Part") or [] if p.get("file")
-                ),
-                view_count=m.get("viewCount") or 0,
-                last_viewed_at=_utc(m["lastViewedAt"]) if m.get("lastViewedAt") else None,
-            )
-            for m in raw
-        ]
+        path = f"/library/sections/{section}/all"
+        raw = self._paged(path, {"type": "4"}, _episode_sig)
+        try:
+            return [_parse_episode(m, section) for m in raw]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise _bad_body(path, exc) from None
 
     def history(self, section: int) -> dict[str, list[datetime]]:
+        path = "/status/sessions/history/all"
         params = {"librarySectionID": str(section), "accountID": str(OWNER_ACCOUNT_ID)}
         grouped: dict[str, list[datetime]] = defaultdict(list)
-        for entry in self._paged("/status/sessions/history/all", params, _history_sig):
-            if entry.get("ratingKey") is None or entry.get("viewedAt") is None:
-                continue
-            grouped[str(entry["ratingKey"])].append(_utc(entry["viewedAt"]))
+        try:
+            for entry in self._paged(path, params, _history_sig):
+                if entry.get("ratingKey") is None or entry.get("viewedAt") is None:
+                    continue
+                grouped[str(entry["ratingKey"])].append(_utc(entry["viewedAt"]))
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError) as exc:
+            raise _bad_body(path, exc) from None
         return {rk: sorted(v) for rk, v in grouped.items()}
 
     def mark_played(self, rating_key: str) -> None:

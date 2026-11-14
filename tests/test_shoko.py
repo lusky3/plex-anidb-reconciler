@@ -124,3 +124,39 @@ def test_get_file_error_raises():
     respx.get(f"{BASE}/api/v3/File/9").mock(return_value=httpx.Response(404))
     with pytest.raises(ShokoError):
         make_client().get_file(9)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={"Total": 1}),  # missing List
+        httpx.Response(200, json={"List": [{"AniDB": {"ID": 1}}]}),  # item without ID
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"List": ["not-an-object"]}),
+        httpx.Response(200, json={"List": [{"ID": 1, "SeriesIDs": [{"EpisodeIDs": "bad"}]}]}),
+        httpx.Response(200, json=42),
+    ],
+    ids=["missing_list", "no_id", "non_json", "non_object_item", "bad_xrefs", "scalar"],
+)
+def test_list_files_malformed_body_raises_shoko_error(response):
+    respx.get(f"{BASE}/api/v3/File").mock(return_value=response)
+    with pytest.raises(ShokoError, match="unexpected body") as exc:
+        make_client().list_files()
+    assert "SECRETKEY" not in str(exc.value)
+
+
+@respx.mock
+def test_get_file_non_json_raises_shoko_error():
+    respx.get(f"{BASE}/api/v3/File/9").mock(return_value=httpx.Response(200, text="nope"))
+    with pytest.raises(ShokoError, match="unexpected body"):
+        make_client().get_file(9)
+
+
+@respx.mock
+def test_transport_error_hides_details():
+    respx.get(f"{BASE}/api/v3/File").mock(side_effect=httpx.ConnectError("boom SECRETKEY http://shoko"))
+    with pytest.raises(ShokoError) as exc:
+        make_client().list_files()
+    assert "SECRETKEY" not in str(exc.value)
+    assert "ConnectError" in str(exc.value)
