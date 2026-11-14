@@ -1,0 +1,7 @@
+[
+  {"MyListID": 1, "AnimeID": 10, "EpisodeID": 50, "FileID": 999, "UpdatedAt": "2023-03-01T21:05:00-05:00", "ViewedAt": "2023-03-01T21:00:00-05:00", "State": 3, "FileState": 0},
+  {"MyListID": 2, "AnimeID": 10, "EpisodeID": 50, "FileID": 12345, "UpdatedAt": "2023-02-01T10:00:00-05:00", "ViewedAt": null, "State": 1, "FileState": 0},
+  {"MyListID": 3, "AnimeID": 10, "EpisodeID": 51, "FileID": 0, "UpdatedAt": "2023-03-02T10:00:00-05:00", "ViewedAt": "2023-03-02T09:00:00-05:00", "State": 3, "FileState": null},
+  {"MyListID": 4, "AnimeID": 10, "EpisodeID": 52, "FileID": 777, "UpdatedAt": null, "ViewedAt": null, "State": 1, "FileState": 0},
+  {"MyListID": 5, "AnimeID": 11, "EpisodeID": null, "FileID": 888, "UpdatedAt": null, "ViewedAt": "2023-04-01T12:00:00-04:00", "State": 3, "FileState": 0}
+]
