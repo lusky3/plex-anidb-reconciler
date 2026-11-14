@@ -1,6 +1,6 @@
 # Configuration
 
-All settings come from environment variables.
+Every setting comes from an environment variable.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -22,13 +22,11 @@ All settings come from environment variables.
 | `RUN_STALE_MINUTES` | `360` | A run active longer than this makes `/healthz` return 503 (>= 1) |
 | `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0) |
 
-Rules:
+Required variables must be set and non-blank. A blank optional variable falls back to its default, with one
+exception: a blank `SHOKO_TZ` is an error.
 
-- Required variables must be set and non-blank.
-- A blank optional variable means its default, except `SHOKO_TZ`: blank is an error.
-- `PLEX_SECTIONS` takes positive integers; duplicates are dropped. Find a section id in Plex Web: open the
-  library and read `source=` in the URL.
-- `PATH_MAP` sides are trimmed and must be non-empty. See [deployment step 5](deployment.md#5-path-map).
-- Integers must be plain decimal digits.
-- An invalid value stops the program with exit code 1 and a config error that names the variable, never its
-  value.
+`PLEX_SECTIONS` takes positive integers and drops duplicates. To find a section id, open the library in Plex Web and
+read `source=` in the URL. `PATH_MAP` sides get trimmed and must be non-empty; see
+[deployment step 5](deployment.md#5-path-map). Integers must be plain decimal digits.
+
+An invalid value stops the program with exit code 1 and a config error that names the variable, never its value.

@@ -1,26 +1,24 @@
 # plex-anidb-reconciler
 
-Reconciles Plex watched state with AniDB MyList through Shoko Server. Plex tracks watched state per library
-item; AniDB tracks it per file, with a view date. This tool reads Plex, Shoko and a MyList snapshot, plans
-per-file changes in both directions, and writes only the ones it can prove are safe. The console script is
+Reconciles Plex watched state with AniDB MyList through Shoko Server. The two don't agree on what "watched" means:
+Plex tracks it per library item, AniDB per file, with a view date. This tool reads Plex, Shoko and a MyList snapshot,
+plans per-file changes in both directions, and writes only the ones it can prove are safe. The console script is
 `pxar`.
 
 ## What it guarantees
 
-- Writes are per file: one Shoko file gets one watched date, never a whole episode or series.
-- An existing AniDB or Shoko watched date is never overwritten.
-- Nothing is ever marked unwatched, in Plex or in AniDB.
-- Ambiguous paths and episode links are reported, not acted on. A Plex item backed by several files is never
-  written to AniDB; it is only marked played in Plex when AniDB already shows all its episodes watched.
-- `plan` is a dry run. Nothing is written without `apply` or `serve`.
-- Every write is recorded in a ledger with its before and after state.
+Writes are per file, so one Shoko file gets one watched date and never a whole episode or series. It won't overwrite
+an existing AniDB or Shoko watched date, and it never marks anything unwatched, in Plex or in AniDB.
+
+- Ambiguous paths and episode links get reported instead of acted on. A Plex item backed by several files never
+  reaches AniDB; the tool marks it played in Plex only when AniDB already shows all its episodes watched.
+- `plan` is a dry run, and nothing gets written without `apply` or `serve`. The ledger records every write with its
+  before and after state.
 
 ## Requirements
 
-- Plex Media Server
-- Shoko Server 5.3.3 with AniDB MyList enabled
-- Docker with Compose
-- Tautulli (optional, for a run right after each watch)
+You need Plex Media Server, Shoko Server 5.3.3 with AniDB MyList enabled, and Docker with Compose. Tautulli is
+optional; add it if you want a run right after each watch.
 
 ## Quick start
 
@@ -32,7 +30,7 @@ docker compose pull
 docker compose run --rm plex-anidb-reconciler plan
 ```
 
-Review the report, then follow the [deployment guide](docs/deployment.md) before you run `apply` or `serve`.
+Read the report, then work through the [deployment guide](docs/deployment.md) before you run `apply` or `serve`.
 
 ## Commands
 
