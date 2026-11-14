@@ -4,6 +4,7 @@ State lives in `/data` (host: `/opt/plex-anidb-reconciler`): `ledger.sqlite` and
 
 Secrets come from Doppler (`SHOKO_API_KEY` in project `misc`, config `dev`). Prefix commands with `doppler run --` or export the variables first.
 
+- [ ] 0. **Host directories.** The container runs as uid 10001. Create the state dir with that owner, or the first run fails writing `ledger.sqlite` / `reports/` (Docker would create it root-owned): `sudo install -d -o 10001 -g 10001 /opt/plex-anidb-reconciler`. The MyList dir mounted at `/mylist:ro` must be readable by uid 10001: check with `ls -ln /opt/shoko/config/Shoko.CLI/MyList` (world-readable or a matching group).
 - [ ] 1. **Backups.** Copy `/opt/shoko/config/Shoko.CLI/SQLite`; export MyList on anidb.net.
 - [ ] 2. **Plex webhooks.** Plex -> Settings -> Webhooks: remove any URL pointing at Shoko (`/plex` or `/plex.json`).
 - [ ] 3. **Shoko settings.**

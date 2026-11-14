@@ -6,6 +6,7 @@ services:
     # No published ports: Tautulli reaches :8787 over the saltbox docker network.
     networks:
       - saltbox
+    # Container uid is 10001: /data must be owned by it; /mylist must be readable by it (see docs/runbook.md step 0).
     volumes:
       - /opt/shoko/config/Shoko.CLI/MyList:/mylist:ro
       - /opt/plex-anidb-reconciler:/data
