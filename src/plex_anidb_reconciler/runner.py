@@ -110,8 +110,16 @@ def _new_run_id(now: datetime) -> str:
 
 
 def _shoko_changed(a: Action, current: ShokoFile) -> bool:
-    """The cached index can be stale (ruling 19): only write if Shoko still links this file the same way."""
-    return current.fid is None or current.fid != a.fid or current.manual_link or sorted(current.eids) != sorted(a.eids)
+    """The cached index can be stale (ruling 19): only write if Shoko still links this file the same way
+    and the file still sits at the exact path the Plex item matched (another release may have replaced it)."""
+    return (
+        current.fid is None
+        or current.fid != a.fid
+        or current.manual_link
+        or sorted(current.eids) != sorted(a.eids)
+        or a.matched_path is None
+        or a.matched_path not in current.abs_paths
+    )
 
 
 def _execute(a: Action, clients: Clients) -> tuple[str, str]:

@@ -650,3 +650,20 @@ def test_exact_match_unaffected():
     assert (a.kind, a.rule, a.file_id) == (ActionKind.SET_FILE_WATCHED, "R2", 1)
     (r1,) = s_reupload().run()
     assert r1.kind is ActionKind.MARK_PLEX_PLAYED
+
+
+# --- G2: SETs carry the exact Shoko path they were matched on (re-checked before the write) ---
+
+
+def test_sets_carry_matched_shoko_path():
+    (a,) = s_new_watch().run()
+    assert (a.kind, a.matched_path) == (ActionKind.SET_FILE_WATCHED, "/p/x.mkv")
+    (b,) = sets(s_r2b_after().run())
+    assert (b.rule, b.matched_path) == ("R2b", "/p/x.mkv")
+
+
+def test_matched_path_is_the_rewritten_shoko_path():
+    sc = simple(items=[item("a", "/plex/x.mkv", last=T2)], files=[shoko(1, 12345, [50], "/shoko/x.mkv")])
+    acts = plan(sc.items, {}, PathMatcher(sc.files, [("/plex", "/shoko")]), sc.mylist(), "record", True)
+    (a,) = acts
+    assert (a.rule, a.matched_path) == ("R2", "/shoko/x.mkv")

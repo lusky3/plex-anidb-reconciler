@@ -70,8 +70,10 @@ def _report(rule: str, reason: str, rk: str, f: ShokoFile | None = None, when: d
     )
 
 
-def _set(rule: str, reason: str, rk: str, f: ShokoFile, when: datetime, depends_on: int | None = None) -> Action:
-    return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason, depends_on)
+def _set(
+    rule: str, reason: str, rk: str, f: ShokoFile, when: datetime, path: str | None, depends_on: int | None = None
+) -> Action:
+    return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason, depends_on, path)
 
 
 def _resolve(item: PlexItem, matcher: PathMatcher) -> list[Match] | tuple[Action, ...]:
@@ -114,6 +116,9 @@ def _plan_item(
         return list(resolved)
     rk = item.rating_key
     files = [m.file for m in resolved]
+    matched: dict[int, str | None] = {}
+    for m in resolved:
+        matched.setdefault(m.file.file_id, m.path)
     eids = tuple(sorted({e for f in files for e in f.eids}))
 
     if item.view_count == 0:
@@ -161,7 +166,7 @@ def _plan_item(
             elif not snapshot_fresh:
                 out.append(_report("R4", "stale_snapshot", rk, f, when))
             else:
-                out.append(_set("R2", "new_watch", rk, f, when))
+                out.append(_set("R2", "new_watch", rk, f, when, matched[f.file_id]))
         else:
             cutoff = mylist.max_watch(f.eids)
             if f.created_at is None:
@@ -174,7 +179,7 @@ def _plan_item(
                 out.append(_report("R2b", "multiple_prerequisites", rk, f, min(plays)))
             elif r2b_policy == "record" and plays and snapshot_fresh:
                 dep = next(iter(prereqs)) if prereqs else None
-                out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays), dep))
+                out.append(_set("R2b", "rewatch_new_release", rk, f, min(plays), matched[f.file_id], dep))
             elif r2b_policy != "record":
                 out.append(_report("R2b", "ignore_policy", rk, f))
             elif not plays:

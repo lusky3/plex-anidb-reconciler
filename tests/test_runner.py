@@ -314,8 +314,10 @@ def test_i1_applied_set_gates_upgraded_file_until_snapshot_catches_up(env):
         {**shoko_file(3, 3, 53)},  # eids changed
         {**shoko_file(3, 3, 52), "SeriesIDs": [{"EpisodeIDs": [{"AniDB": 52, "Source": "User"}]}]},  # manual link
         {**shoko_file(3, 3, 52), "AniDB": None},  # no longer recognised
+        {**shoko_file(3, 3, 52), "Locations": [{"AbsolutePath": "/p/other.mkv"}]},  # path now another file's
+        {**shoko_file(3, 3, 52), "Locations": []},  # no paths returned
     ],
-    ids=["fid", "eids", "manual_link", "no_fid"],
+    ids=["fid", "eids", "manual_link", "no_fid", "path_moved", "no_paths"],
 )
 @respx.mock
 def test_m2_shoko_changed_since_index_blocks_write(env, current):
