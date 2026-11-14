@@ -10,7 +10,8 @@ per-file changes in both directions, and writes only the ones it can prove are s
 - Writes are per file: one Shoko file gets one watched date, never a whole episode or series.
 - An existing AniDB or Shoko watched date is never overwritten.
 - Nothing is ever marked unwatched, in Plex or in AniDB.
-- Ambiguous cases (paths, episode links, multiple versions) are reported, not written.
+- Ambiguous paths and episode links are reported, not acted on. A Plex item backed by several files is never
+  written to AniDB; it is only marked played in Plex when AniDB already shows all its episodes watched.
 - `plan` is a dry run. Nothing is written without `apply` or `serve`.
 - Every write is recorded in a ledger with its before and after state.
 
@@ -26,6 +27,7 @@ per-file changes in both directions, and writes only the ones it can prove are s
 ```sh
 cp compose.example.yml compose.yml   # set host paths, network and PLEX_SECTIONS
 cp .env.example .env                 # fill in SHOKO_API_KEY and PLEX_TOKEN
+sudo install -d -o 10001 -g 10001 /path/to/state-dir   # container runs as uid 10001
 docker compose pull
 docker compose run --rm plex-anidb-reconciler plan
 ```
