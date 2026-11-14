@@ -13,10 +13,10 @@ def _int(env: Mapping[str, str], name: str, default: int, minimum: int) -> int:
     raw = (env.get(name) or "").strip()
     if raw == "":
         return default
-    try:
-        value = int(raw, 10)
-    except ValueError:
-        raise ValueError(f"{name} must be an integer") from None
+    digits = raw.removeprefix("-")
+    if not (digits.isascii() and digits.isdigit()):  # no "+5", "1_000" or Unicode digits
+        raise ValueError(f"{name} must be an integer")
+    value = int(raw, 10)
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum}")
     return value

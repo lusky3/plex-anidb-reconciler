@@ -166,3 +166,12 @@ def test_listen_rejected(raw):
 
 def test_r2b_policy_is_stripped():
     assert Settings.from_env({**BASE, "R2B_POLICY": " ignore "}).r2b_policy == "ignore"
+
+
+@pytest.mark.parametrize("raw", ["1_000", "+5", "\u0665", "\uff15", " 5_0 "])
+def test_int_rejects_underscores_plus_and_unicode_digits(raw):
+    assert "MAX_WRITES" in _err(MAX_WRITES=raw)
+
+
+def test_int_accepts_plain_digits_and_negative_gives_range_error():
+    assert "must be >=" in _err(MAX_WRITES="-3")
