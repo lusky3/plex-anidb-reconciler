@@ -1,24 +1,22 @@
 # plex-anidb-reconciler
 
-Reconciles Plex watched state with AniDB MyList through Shoko Server. The two don't agree on what "watched" means:
-Plex tracks it per library item, AniDB per file, with a view date. This tool reads Plex, Shoko and a MyList snapshot,
-plans per-file changes in both directions, and writes only the ones it can prove are safe. The console script is
-`pxar`.
+Reconciles Plex watched state with AniDB MyList through Shoko Server. Plex tracks watched state per library item,
+AniDB per file with a view date, so this tool reads Plex, Shoko and a MyList snapshot, plans per-file changes in both
+directions, and writes only the ones it can prove are safe. The console script is `pxar`.
 
 ## What it guarantees
 
-Writes are per file, so one Shoko file gets one watched date and never a whole episode or series. It won't overwrite
-an existing AniDB or Shoko watched date, and it never marks anything unwatched, in Plex or in AniDB.
+Writes are per file: one Shoko file gets one watched date, never a whole episode or series. It won't overwrite an
+existing AniDB or Shoko watched date or mark anything unwatched, in Plex or in AniDB.
 
-- Ambiguous paths and episode links get reported instead of acted on. A Plex item backed by several files never
-  reaches AniDB; the tool marks it played in Plex only when AniDB already shows all its episodes watched.
-- `plan` is a dry run, and nothing gets written without `apply` or `serve`. The ledger records every write with its
-  before and after state.
+- Ambiguous paths and episode links get reported, not acted on. A Plex item backed by several files never reaches
+  AniDB; it's marked played in Plex only when AniDB already shows all its episodes watched.
+- `plan` is a dry run; only `apply` and `serve` write, and a ledger records each write's before and after state.
 
 ## Requirements
 
 You need Plex Media Server, Shoko Server 5.3.3 with AniDB MyList enabled, and Docker with Compose. Tautulli is
-optional; add it if you want a run right after each watch.
+optional, for a run right after each watch.
 
 ## Quick start
 
