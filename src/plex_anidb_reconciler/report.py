@@ -2,12 +2,15 @@
 
 import csv
 import html
+import logging
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
 from plex_anidb_reconciler.ledger import iso_utc
 from plex_anidb_reconciler.models import ActionKind, MyListFileState, Outcome
+
+log = logging.getLogger(__name__)
 
 # New columns are appended so existing CSV consumers keep working.
 COLUMNS = [
@@ -113,13 +116,14 @@ def prune_reports(directory: Path, keep: int = 200) -> None:
 def _prune(directory: Path, pattern: str, keep: int) -> None:
     try:
         reports = sorted(p for p in directory.glob(pattern) if p.is_file())
-    except OSError:
+    except OSError as exc:
+        log.debug("reports not pruned: cannot list them (%s)", type(exc).__name__)
         return
     for old in reports[: max(len(reports) - keep, 0)]:
         try:
             old.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("old report not removed (%s)", type(exc).__name__)
 
 
 def _summary_key(outcome: Outcome) -> str:

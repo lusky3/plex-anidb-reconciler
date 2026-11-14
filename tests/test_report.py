@@ -98,3 +98,20 @@ def test_html_report_empty(tmp_path):
     path = tmp_path / "run.html"
     write_html_report([], path)
     assert "no actions" in path.read_text(encoding="utf-8")
+
+
+def test_prune_failures_logged_at_debug(tmp_path, monkeypatch, caplog):
+    from pathlib import Path
+
+    for d in range(1, 4):
+        (tmp_path / f"2026010{d}T000000Z-a.csv").write_text("x")
+
+    def refuse(self, missing_ok=False):
+        raise PermissionError(f"secret path {self}")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with caplog.at_level("DEBUG", logger="plex_anidb_reconciler.report"):
+        prune_reports(tmp_path, keep=1)
+    assert caplog.text.count("old report not removed (PermissionError)") == 2
+    assert "secret path" not in caplog.text
+    assert len(list(tmp_path.iterdir())) == 3
