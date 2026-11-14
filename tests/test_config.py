@@ -7,6 +7,7 @@ BASE = {
     "SHOKO_API_KEY": "shoko-secret",
     "PLEX_URL": "http://plex:32400",
     "PLEX_TOKEN": "plex-secret",
+    "PLEX_SECTIONS": "4,5",
 }
 
 
@@ -16,7 +17,7 @@ def test_defaults():
     assert s.r2b_policy == "record"
     assert s.max_writes == 500
     assert s.snapshot_max_age_h == 26
-    assert s.shoko_tz.key == "America/New_York"
+    assert s.shoko_tz.key == "UTC"
     assert s.mylist_path == "/mylist/mylist.json"
     assert s.data_dir == "/data"
     assert s.path_map == ()
@@ -28,8 +29,8 @@ def test_defaults():
 
 
 def test_path_map_parsing():
-    s = Settings.from_env({**BASE, "PATH_MAP": "/data/TV=/mnt/media/TV;/x=/y"})
-    assert s.path_map == (("/data/TV", "/mnt/media/TV"), ("/x", "/y"))
+    s = Settings.from_env({**BASE, "PATH_MAP": "/plex/anime=/shoko/anime;/x=/y"})
+    assert s.path_map == (("/plex/anime", "/shoko/anime"), ("/x", "/y"))
 
 
 def test_missing_secret_raises():
@@ -42,15 +43,24 @@ def test_missing_secret_raises():
         assert value not in msg
 
 
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_plex_sections_is_required(value):
+    env = {k: v for k, v in BASE.items() if k != "PLEX_SECTIONS"}
+    if value is not None:
+        env["PLEX_SECTIONS"] = value
+    with pytest.raises(ValueError, match="PLEX_SECTIONS"):
+        Settings.from_env(env)
+
+
 def test_invalid_r2b_policy_raises():
     with pytest.raises(ValueError, match="R2B_POLICY"):
         Settings.from_env({**BASE, "R2B_POLICY": "bogus"})
 
 
 def test_overrides():
-    s = Settings.from_env({**BASE, "PLEX_SECTIONS": "1, 2", "SHOKO_TZ": "UTC", "MAX_WRITES": "5"})
+    s = Settings.from_env({**BASE, "PLEX_SECTIONS": "1, 2", "SHOKO_TZ": "Europe/Berlin", "MAX_WRITES": "5"})
     assert s.plex_sections == (1, 2)
-    assert s.shoko_tz.key == "UTC"
+    assert s.shoko_tz.key == "Europe/Berlin"
     assert s.max_writes == 5
 
 
@@ -89,8 +99,8 @@ def test_plex_sections_deduplicated():
 
 
 def test_path_map_parts_are_stripped():
-    s = Settings.from_env({**BASE, "PATH_MAP": " /data/TV = /mnt/media/TV ; /x=/y ;"})
-    assert s.path_map == (("/data/TV", "/mnt/media/TV"), ("/x", "/y"))
+    s = Settings.from_env({**BASE, "PATH_MAP": " /plex/anime = /shoko/anime ; /x=/y ;"})
+    assert s.path_map == (("/plex/anime", "/shoko/anime"), ("/x", "/y"))
 
 
 @pytest.mark.parametrize("raw", ["/a", "=/b", "/a=", " = /b", "/a= ", "/a=/b=/c", "/a=/b;junk"])

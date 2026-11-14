@@ -984,7 +984,7 @@ def test_triggered_run_uses_the_full_runs_earliest_date_for_a_shared_file(env):
     # the later-played item a is triggered: the one merged SET for file 1 is executed with b's earlier date
     res = go(env, apply=True, rating_keys=frozenset({"a"}))
     assert res.counts == {"applied": 1}
-    assert json.loads(put.calls.last.request.content)["LastWatchedAt"] == "2026-01-31T19:00:00-05:00"
+    assert json.loads(put.calls.last.request.content)["LastWatchedAt"] == "2026-02-01T00:00:00+00:00"
     rows = [r for r in decisions(res) if r[1] == "set_file_watched"]
     assert rows == [("R2", "set_file_watched", "1", "2026-02-01T00:00:00+00:00", "new_watch", "applied", "")]
 
