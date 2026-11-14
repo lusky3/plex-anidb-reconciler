@@ -45,6 +45,8 @@ def load_mylist(path: Path) -> list[MyListEntry]:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise SnapshotError(f"{path}: cannot read snapshot ({exc.strerror or type(exc).__name__})") from exc
+    except UnicodeDecodeError as exc:
+        raise SnapshotError(f"{path}: snapshot is not valid UTF-8") from exc
     try:
         data = json.loads(text)
     except ValueError as exc:

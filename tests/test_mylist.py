@@ -84,3 +84,10 @@ def test_snapshot_age(tmp_path):
     mtime = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     os.utime(p, (mtime.timestamp(), mtime.timestamp()))
     assert snapshot_age(p, mtime + timedelta(hours=5)) == timedelta(hours=5)
+
+
+def test_non_utf8_raises_snapshot_error(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_bytes(b"\xff\xfe[\x80")
+    with pytest.raises(SnapshotError, match="bad.json"):
+        load_mylist(p)
