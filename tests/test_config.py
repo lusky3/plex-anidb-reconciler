@@ -24,6 +24,7 @@ def test_defaults():
     assert s.shoko_index_ttl_min == 60
     assert s.listen == "0.0.0.0:8787"
     assert s.shutdown_grace_s == 25
+    assert s.run_stale_minutes == 360
 
 
 def test_path_map_parsing():
@@ -158,6 +159,10 @@ def test_listen_accepted(raw, expected):
         "[::1]8787",
         "[zz]:80",
         "[::1]:",
+        "host:\u0665",
+        "[::1]:\uff18",
+        "host:+80",
+        "host:8_0",
     ],
 )
 def test_listen_rejected(raw):
@@ -175,3 +180,9 @@ def test_int_rejects_underscores_plus_and_unicode_digits(raw):
 
 def test_int_accepts_plain_digits_and_negative_gives_range_error():
     assert "must be >=" in _err(MAX_WRITES="-3")
+
+
+def test_run_stale_minutes_override_and_validation():
+    assert Settings.from_env({**BASE, "RUN_STALE_MINUTES": "90"}).run_stale_minutes == 90
+    for raw in ("0", "-5", "1_0", "x"):
+        assert "RUN_STALE_MINUTES" in _err(RUN_STALE_MINUTES=raw)

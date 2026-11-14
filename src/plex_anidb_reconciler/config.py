@@ -8,13 +8,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN")
 
 
+def _is_ascii_int(raw: str) -> bool:
+    """ASCII decimal digits with an optional leading '-': no '+5', '1_000' or Unicode digits."""
+    digits = raw.removeprefix("-")
+    return digits.isascii() and digits.isdigit()
+
+
 def _int(env: Mapping[str, str], name: str, default: int, minimum: int) -> int:
     """Blank or unset -> default. Only plain decimal integers >= minimum are accepted."""
     raw = (env.get(name) or "").strip()
     if raw == "":
         return default
-    digits = raw.removeprefix("-")
-    if not (digits.isascii() and digits.isdigit()):  # no "+5", "1_000" or Unicode digits
+    if not _is_ascii_int(raw):
         raise ValueError(f"{name} must be an integer")
     value = int(raw, 10)
     if value < minimum:
@@ -71,7 +76,7 @@ def parse_listen(raw: str) -> tuple[str, int]:
         if not sep or ":" in host:  # a bare IPv6 literal needs brackets
             raise bad
         host = host or "0.0.0.0"
-    if not port_s.isdigit() or not 1 <= int(port_s) <= 65535:
+    if not _is_ascii_int(port_s) or not 1 <= int(port_s) <= 65535:
         raise bad
     return host, int(port_s)
 
@@ -94,6 +99,7 @@ class Settings:
     shoko_index_ttl_min: int  # 0 = no cache (fetch the Shoko index every run)
     listen: str
     shutdown_grace_s: int = 25
+    run_stale_minutes: int = 360  # an active run longer than this makes /healthz stale
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -137,4 +143,5 @@ class Settings:
             shoko_index_ttl_min=_int(env, "SHOKO_INDEX_TTL_MIN", 60, 0),
             listen=listen,
             shutdown_grace_s=_int(env, "SHUTDOWN_GRACE_S", 25, 0),
+            run_stale_minutes=_int(env, "RUN_STALE_MINUTES", 360, 1),
         )
