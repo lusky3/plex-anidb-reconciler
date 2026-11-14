@@ -539,3 +539,27 @@ def test_set_dedupe_tie_breaks_on_smallest_rating_key_regardless_of_order():
 def test_plan_rejects_unknown_r2b_policy():
     with pytest.raises(ValueError, match="r2b_policy"):
         Scenario(**{**s_new_watch().__dict__, "policy": "recrod"}).run()
+
+
+def test_many_conflicts_plan_quickly():
+    """Replanning settles every independent same-episode conflict per pass (not one per pass)."""
+    import time
+
+    n = 1500
+    items, files, entries, history = [], [], [], {}
+    for i in range(n):
+        eid = 10_000 + i
+        for k, when in ((0, T1), (1, T2)):
+            fid, rk, path = 2 * i + k + 1, f"r{i}-{k}", f"/p/{i}/{k}.mkv"
+            files.append(shoko(fid, fid, [eid], path))
+            entries.append(entry(fid, eid, None))
+            items.append(item(rk, path, last=when))
+            history[rk] = [when]
+    sc = Scenario(items=items, files=files, entries=entries, history=history)
+    start = time.perf_counter()
+    acts = sc.run()
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"plan took {elapsed:.2f}s"
+    # per episode: the earlier file gets R2, the later one an R2b gated on the earlier date
+    assert [(a.rule, a.when) for a in sets(acts)] == [("R2", T1), ("R2b", T2)] * n
+    assert reports(acts) == []

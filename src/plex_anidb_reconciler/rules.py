@@ -25,6 +25,7 @@ class _Watched:
                 self._fids.add(p.fid)
             for e in p.eids:
                 self._views[e].append(p.when)
+        self._watched_eids = frozenset(self._ml.watched_eids() | set(self._views))
 
     def has_fid(self, fid: int | None) -> bool:
         return self._ml.has_fid(fid)
@@ -35,8 +36,8 @@ class _Watched:
     def fid_watched(self, fid: int | None) -> bool:
         return self._ml.fid_watched(fid) or (bool(fid) and fid in self._fids)
 
-    def watched_eids(self) -> set[int]:
-        return self._ml.watched_eids() | set(self._views)
+    def watched_eids(self) -> frozenset[int]:
+        return self._watched_eids
 
     def max_watch(self, eids: Iterable[int]) -> datetime | None:
         eids = list(eids)
@@ -64,10 +65,29 @@ def _set(rule: str, reason: str, rk: str, f: ShokoFile, when: datetime) -> Actio
     return Action(ActionKind.SET_FILE_WATCHED, rule, rk, f.file_id, f.fid, f.eids, when, reason)
 
 
+def _resolve(item: PlexItem, matcher: PathMatcher) -> list[ShokoFile] | Action:
+    """The Shoko files behind a Plex item, or the R4 report explaining why there are none usable.
+    Independent of watch state, so plan() resolves each item once."""
+    rk = item.rating_key
+    matches = [matcher.match(p) for p in item.paths]
+    if any(m is None for m in matches):
+        return _report("R4", "no_shoko_match", rk)
+    if any(isinstance(m, Ambiguous) for m in matches):
+        return _report("R4", "ambiguous_path", rk)
+    files: list[ShokoFile] = [m for m in matches if isinstance(m, ShokoFile)]
+    if not files or any(f.fid is None for f in files):
+        return _report("R4", "unrecognised", rk)
+    if any(f.manual_link for f in files):
+        return _report("R4", "manual_link", rk)
+    if any(not f.eids for f in files):
+        return _report("R4", "no_episodes", rk)
+    return files
+
+
 def _plan_item(
     item: PlexItem,
+    resolved: list[ShokoFile] | Action,
     history: dict[str, list[datetime]],
-    matcher: PathMatcher,
     r1_state: _Watched,
     mylist: _Watched,
     r2b_policy: str,
@@ -76,20 +96,10 @@ def _plan_item(
 ) -> list[Action]:
     """r1_state drives R1 (snapshot + applied writes only); mylist drives R2/R2b and also includes
     SETs planned earlier in this same plan() call."""
+    if isinstance(resolved, Action):
+        return [resolved]
     rk = item.rating_key
-    matches = [matcher.match(p) for p in item.paths]
-    if any(m is None for m in matches):
-        return [_report("R4", "no_shoko_match", rk)]
-    if any(isinstance(m, Ambiguous) for m in matches):
-        return [_report("R4", "ambiguous_path", rk)]
-    files: list[ShokoFile] = [m for m in matches if isinstance(m, ShokoFile)]
-    if not files or any(f.fid is None for f in files):
-        return [_report("R4", "unrecognised", rk)]
-    if any(f.manual_link for f in files):
-        return [_report("R4", "manual_link", rk)]
-    if any(not f.eids for f in files):
-        return [_report("R4", "no_episodes", rk)]
-
+    files = resolved
     eids = tuple(sorted({e for f in files for e in f.eids}))
 
     if item.view_count == 0:
@@ -181,17 +191,35 @@ def _merge(actions: list[Action]) -> tuple[list[Action], dict[int, Action]]:
     return kept, best_set
 
 
-def _r2_conflict_winner(sets: Iterable[Action]) -> Action | None:
-    """Earliest R2 SET sharing an eid with an R2 SET of a different file, if any."""
+def _r2_conflict_winners(sets: Iterable[Action]) -> list[Action]:
+    """R2 SETs of different files that share an eid conflict. Conflicts linked through shared eids form
+    one group; the earliest SET of each group wins. Groups cannot affect each other (a winner only marks
+    its own eids watched, and every R2 sharing one of them is in its group), so settling all groups in
+    one pass gives the same result as settling one conflict per pass."""
     r2 = [a for a in sets if a.rule == "R2"]
     files_by_eid: dict[int, set[int | None]] = defaultdict(set)
     for a in r2:
         for e in a.eids:
             files_by_eid[e].add(a.file_id)
     conflicted = [a for a in r2 if any(len(files_by_eid[e]) > 1 for e in a.eids)]
-    if not conflicted:
-        return None
-    return min(conflicted, key=lambda a: (a.when, a.file_id or 0))
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a in conflicted:  # union each SET's eids into one group
+        root = find(a.eids[0])
+        for e in a.eids[1:]:
+            parent[find(e)] = root
+    best: dict[int, Action] = {}
+    for a in conflicted:
+        g = find(a.eids[0])
+        if g not in best or (a.when, a.file_id or 0) < (best[g].when, best[g].file_id or 0):
+            best[g] = a
+    return sorted(best.values(), key=lambda a: (a.when, a.file_id or 0))
 
 
 def plan(
@@ -211,20 +239,21 @@ def plan(
         raise ValueError("r2b_policy must be 'record' or 'ignore'")
     pending = list(pending)
     r1_state = _Watched(mylist, pending)
+    resolved = [(item, _resolve(item, matcher)) for item in items]
     committed: list[Action] = []
     while True:
         planned = [PendingWatch(a.file_id or 0, a.fid, a.eids, a.when) for a in committed if a.when is not None]
         state = _Watched(mylist, [*pending, *planned])
         actions: list[Action] = []
-        for item in items:
-            actions.extend(_plan_item(item, history, matcher, r1_state, state, r2b_policy, snapshot_fresh, r1_marked))
+        for item, res in resolved:
+            actions.extend(_plan_item(item, res, history, r1_state, state, r2b_policy, snapshot_fresh, r1_marked))
         kept, best_set = _merge(actions)
         # Two different files of one episode must not both get R2 in one run: keep the earliest as R2,
         # treat it as written and re-plan, so the others go through the gated R2b path (ruling 16).
-        winner = _r2_conflict_winner(best_set.values())
-        if winner is None:
+        winners = _r2_conflict_winners(best_set.values())
+        if not winners:
             break
-        committed.append(winner)
+        committed.extend(winners)
     kept.extend(best_set.values())
     kept.extend(committed)
     return sorted(kept, key=_sort_key)
