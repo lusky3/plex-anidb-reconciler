@@ -53,6 +53,7 @@ def make_service(run_fn, clock=lambda: datetime(2026, 1, 1, tzinfo=UTC)):
         listen="127.0.0.1:0",
         shutdown_grace_s=25,
         run_stale_minutes=360,
+        health_max_failed_runs=3,
         shoko_api_key="SHOKOSECRET",
         plex_token="PLEXSECRET",
     )
@@ -137,7 +138,14 @@ def test_healthz_reports_last_run():
     try:
         assert get(base + "/healthz") == (
             200,
-            {"last_run_id": None, "last_status": None, "last_finished": None, "snapshot": None, "loop": "ok"},
+            {
+                "last_run_id": None,
+                "last_status": None,
+                "last_finished": None,
+                "snapshot": None,
+                "failed_runs": 0,
+                "loop": "ok",
+            },
         )
         svc.run_pending_now()
         assert get(base + "/healthz") == (
@@ -147,6 +155,7 @@ def test_healthz_reports_last_run():
                 "last_status": "ok",
                 "last_finished": "2026-01-01T00:00:00+00:00",
                 "snapshot": "ok",
+                "failed_runs": 0,
                 "loop": "ok",
             },
         )
@@ -689,3 +698,123 @@ def test_run_pending_now_passes_scope():
     svc.run_pending_now()
     svc.run_pending_now(frozenset({"9"}))
     assert seen == [None, frozenset({"9"})]
+
+
+# --- consecutive failed runs make /healthz unhealthy ---
+
+
+def test_consecutive_failed_runs_make_healthz_503_until_a_run_succeeds():
+    from plex_anidb_reconciler.shoko import ShokoError
+
+    results = iter(
+        [
+            ShokoError("Shoko GET /api/v3/File returned HTTP 500"),
+            FakeResult("b", {"failed": 1}),
+            FakeResult("c", {"snapshot_unavailable": 1}, snapshot="unavailable"),
+            FakeResult("d", {"applied": 1}),
+        ]
+    )
+
+    def run_fn(settings, **kw):
+        r = next(results)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    svc = make_service(run_fn)
+    server, base = start_http(svc)
+    stop, t = start_loop(svc)
+    try:
+        svc.run_pending_now()
+        svc.run_pending_now()
+        code, body = get(base + "/healthz")
+        assert (code, body["failed_runs"]) == (200, 2) and "unhealthy" not in body
+        svc.run_pending_now()  # the third in a row (HEALTH_MAX_FAILED_RUNS=3)
+        code, body = get(base + "/healthz")
+        assert (code, body["failed_runs"], body["loop"]) == (503, 3, "ok")
+        assert body["last_status"] == "snapshot_unavailable"
+        assert body["unhealthy"] == "3 consecutive failed runs (last: snapshot_unavailable)"
+        svc.run_pending_now()  # a successful run resets the count
+        code, body = get(base + "/healthz")
+        assert (code, body["failed_runs"], body["last_status"]) == (200, 0, "ok") and "unhealthy" not in body
+    finally:
+        stop_loop(svc, stop, t)
+        server.shutdown()
+        server.server_close()
+
+
+def test_health_max_failed_runs_threshold_is_configurable():
+    svc = make_service(lambda s, **kw: FakeResult("a", {"failed": 1}))
+    svc.settings.health_max_failed_runs = 1
+    svc.run_pending_now()
+    assert svc.health()["unhealthy"] == "1 consecutive failed runs (last: failed)"
+
+
+# --- serve logs backend errors sanitised: the CLI's text, never a URL or secret ---
+
+
+def test_serve_logs_backend_error_message(caplog):
+    from plex_anidb_reconciler.plex import PlexError
+    from plex_anidb_reconciler.shoko import ShokoError
+
+    errors = iter(
+        [ShokoError("Shoko GET /api/v3/File returned HTTP 500"), PlexError("Plex GET /:/scrobble failed: ReadTimeout")]
+    )
+
+    def run_fn(settings, **kw):
+        raise next(errors)
+
+    svc = make_service(run_fn)
+    with caplog.at_level("ERROR"):
+        svc.run_pending_now()
+        svc.run_pending_now()
+    assert "reconcile run failed: Shoko GET /api/v3/File returned HTTP 500" in caplog.text
+    assert "reconcile run failed: Plex GET /:/scrobble failed: ReadTimeout" in caplog.text
+    assert svc.health()["last_status"] == "error:PlexError"
+
+
+def test_serve_logs_only_the_type_of_other_exceptions(caplog):
+    def run_fn(settings, **kw):
+        raise RuntimeError("http://plex:32400/?X-Plex-Token=PLEXSECRET apikey=SHOKOSECRET")
+
+    svc = make_service(run_fn)
+    with caplog.at_level("ERROR"):
+        svc.run_pending_now()
+    assert "reconcile run failed: RuntimeError" in caplog.text
+    assert "PLEXSECRET" not in caplog.text and "SHOKOSECRET" not in caplog.text and "http://" not in caplog.text
+
+
+def test_serve_real_client_errors_log_no_secrets(tmp_path, caplog):
+    """End to end through run_once and the real HTTP clients: transport errors whose text carries the secrets."""
+    import httpx
+    import respx
+
+    from plex_anidb_reconciler.config import Settings
+
+    mylist = tmp_path / "mylist.json"
+    mylist.write_text("[]")
+    settings = Settings.from_env(
+        {
+            "SHOKO_URL": "http://shoko:8111",
+            "SHOKO_API_KEY": "SHOKOSECRET",
+            "PLEX_URL": "http://plex:32400",
+            "PLEX_TOKEN": "PLEXSECRET",
+            "PLEX_SECTIONS": "4",
+            "MYLIST_PATH": str(mylist),
+            "DATA_DIR": str(tmp_path / "data"),
+        }
+    )
+    leak = "http://plex:32400/?X-Plex-Token=PLEXSECRET apikey=SHOKOSECRET"
+    svc = Service(settings, clock=lambda: datetime.now(UTC))
+    with respx.mock, caplog.at_level("DEBUG"):
+        respx.get("http://shoko:8111/api/v3/File").mock(side_effect=httpx.ConnectError(leak))
+        svc.run_pending_now()
+        respx.get("http://shoko:8111/api/v3/File").mock(return_value=httpx.Response(200, json={"List": []}))
+        respx.get(url__regex=r"http://plex:32400/library/sections/4/all.*").mock(
+            return_value=httpx.Response(401, text=leak)
+        )
+        svc.run_pending_now()
+    assert "reconcile run failed: GET /api/v3/File failed: ConnectError" in caplog.text
+    assert "reconcile run failed: GET /library/sections/4/all returned HTTP 401" in caplog.text
+    assert "PLEXSECRET" not in caplog.text and "SHOKOSECRET" not in caplog.text
+    assert svc.health()["failed_runs"] == 2

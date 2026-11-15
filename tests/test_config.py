@@ -26,6 +26,7 @@ def test_defaults():
     assert s.listen == "0.0.0.0:8787"
     assert s.shutdown_grace_s == 25
     assert s.run_stale_minutes == 360
+    assert s.health_max_failed_runs == 3
 
 
 def test_path_map_parsing():
@@ -201,3 +202,9 @@ def test_run_stale_minutes_override_and_validation():
 @pytest.mark.parametrize("raw", ["+3", "1_0", "٥", "５", "3,+7", "3,1_0"])
 def test_plex_sections_reject_non_ascii_decimal(raw):
     assert "PLEX_SECTIONS" in _err(PLEX_SECTIONS=raw)
+
+
+def test_health_max_failed_runs_override_and_validation():
+    assert Settings.from_env({**BASE, "HEALTH_MAX_FAILED_RUNS": "5"}).health_max_failed_runs == 5
+    for raw in ("0", "-1", "1_0", "+2", "x"):
+        assert "HEALTH_MAX_FAILED_RUNS" in _err(HEALTH_MAX_FAILED_RUNS=raw)

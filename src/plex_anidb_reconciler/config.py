@@ -99,6 +99,7 @@ class Settings:
     listen: str
     shutdown_grace_s: int = 25
     run_stale_minutes: int = 360  # an active run longer than this makes /healthz stale
+    health_max_failed_runs: int = 3  # this many failed runs in a row make /healthz return 503
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -143,4 +144,5 @@ class Settings:
             listen=listen,
             shutdown_grace_s=_int(env, "SHUTDOWN_GRACE_S", 25, 0),
             run_stale_minutes=_int(env, "RUN_STALE_MINUTES", 360, 1),
+            health_max_failed_runs=_int(env, "HEALTH_MAX_FAILED_RUNS", 3, 1),
         )
