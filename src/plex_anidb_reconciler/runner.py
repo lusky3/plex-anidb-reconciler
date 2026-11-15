@@ -219,7 +219,7 @@ def _plan_actions(env: RunEnv, snapshot: Snapshot) -> list[Action]:
         snapshot.index,
         env.settings.r2b_policy,
         snapshot.fresh,
-        r1_marked=env.ledger.applied_r1_keys(),
+        r1_marked=env.ledger.r1_marked_keys(),
         pending=env.ledger.applied_sets(),
     )
 
@@ -361,15 +361,21 @@ class _Executor:
         return self._set_status.get(action.depends_on_file_id) == success
 
     def _write(self, action: Action) -> Outcome:
+        # R1: a pending ledger row goes in before the scrobble, so a crash right after Plex applied it still
+        # leaves the item marked as the reconciler's (its lastViewedAt is then never used as an AniDB date).
+        pending = self._ledger.start(self._run_id, action) if action.kind is ActionKind.MARK_PLEX_PLAYED else None
         outcome = _execute(action, self._clients, self._stop)
-        if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row
+        if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row (R1 never skips)
             return outcome
         self._budget -= 1
         self.shoko_changed += outcome.detail == "shoko_changed"
         outcome = replace(outcome, before=self._audit_before(outcome))
-        self._ledger.record(
-            self._run_id, action, outcome.status, outcome.detail, before=outcome.before, after=outcome.after
-        )
+        if pending is not None:
+            self._ledger.finish(pending, outcome.status, outcome.detail, before=outcome.before, after=outcome.after)
+        else:
+            self._ledger.record(
+                self._run_id, action, outcome.status, outcome.detail, before=outcome.before, after=outcome.after
+            )
         return outcome
 
     def _audit_before(self, outcome: Outcome) -> dict[str, object]:

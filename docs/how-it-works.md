@@ -142,7 +142,9 @@ the MyList `State` of the fid (1 HDD, 2 disk, 3 deleted, 4 remote) and `anidb_vi
 stay empty when the fid isn't in the snapshot. A row's status is one of `dry_run`, `applied`, `failed`, `skipped`,
 `skipped_ledger`, `capped` or `reported`.
 
-`ledger.sqlite` holds applied and failed writes only. Its `before` column stores the snapshot state and view date,
+`ledger.sqlite` holds applied and failed writes only, plus `pending` rows for R1. An R1 row goes in as `pending`
+before the scrobble is sent and becomes `applied` or `failed` right after, so if the process dies in between, the
+item still counts as marked by this tool and its `lastViewedAt` never becomes an AniDB date. Its `before` column stores the snapshot state and view date,
 Plex `viewCount`, and Shoko's `LastWatchedAt`/`WatchedCount` as read just before the write. `after` stores the date
 written or `{"plex_played": true}`, and stays empty for a failed write. Older ledgers get these columns on first
 open.

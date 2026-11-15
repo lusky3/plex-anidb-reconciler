@@ -1,7 +1,9 @@
 """SQLite ledger: audit and idempotency record of writes the reconciler attempted.
 
-It stores only ``applied`` and ``failed`` rows. Planned/skipped/capped/reported actions go to the
-per-run CSV report alone, so the ledger grows with real writes, not with every poll."""
+It stores only ``applied`` and ``failed`` rows, plus ``pending`` R1 rows: an R1 row is written before the Plex
+scrobble is sent and finished right after, so a crash in between still leaves a record that the reconciler may
+have marked that item. Planned/skipped/capped/reported actions go to the per-run CSV report alone, so the ledger
+grows with real writes, not with every poll."""
 
 import json
 import sqlite3
@@ -10,7 +12,8 @@ from pathlib import Path
 
 from plex_anidb_reconciler.models import Action, ActionKind, PendingWatch, Status
 
-STATUSES = (Status.APPLIED, Status.FAILED)
+STATUSES = (Status.APPLIED, Status.FAILED)  # final states of a write
+KEPT = (Status.APPLIED, Status.FAILED, Status.PENDING)  # what the ledger keeps on open
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS actions (
@@ -64,7 +67,7 @@ class Ledger:
         self._db.executescript(_SCHEMA)
         self._add_missing_columns()
         # rows from versions that also stored planned/skipped actions: the ledger only audits writes
-        self._db.execute("DELETE FROM actions WHERE status NOT IN (?, ?)", STATUSES)
+        self._db.execute("DELETE FROM actions WHERE status NOT IN (?, ?, ?)", KEPT)
         self._db.commit()
 
     def _add_missing_columns(self) -> None:
@@ -85,11 +88,11 @@ class Ledger:
             return False
         return self._db.execute(query, (kind.value, key, Status.APPLIED)).fetchone() is not None
 
-    def applied_r1_keys(self) -> frozenset[str]:
-        """Rating keys the reconciler itself marked played in Plex (R1)."""
+    def r1_marked_keys(self) -> frozenset[str]:
+        """Rating keys the reconciler marked played in Plex (R1), or may have: applied and pending rows."""
         rows = self._db.execute(
-            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status = ? AND rating_key IS NOT NULL",
-            (ActionKind.MARK_PLEX_PLAYED.value, Status.APPLIED),
+            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status IN (?, ?) AND rating_key IS NOT NULL",
+            (ActionKind.MARK_PLEX_PLAYED.value, Status.APPLIED, Status.PENDING),
         )
         return frozenset(r[0] for r in rows)
 
@@ -110,6 +113,30 @@ class Ledger:
             for file_id, fid, eids, when_ts in rows
         ]
 
+    def start(self, run_id: str, action: Action) -> int:
+        """Store a pending R1 row before its scrobble is sent and return its id for finish()."""
+        if action.kind is not ActionKind.MARK_PLEX_PLAYED:
+            raise ValueError("only R1 writes get a pending ledger row")
+        return self._insert(run_id, action, Status.PENDING, "", None, None)
+
+    def finish(
+        self,
+        row_id: int,
+        status: Status | str,
+        detail: str = "",
+        *,
+        before: dict[str, object] | None = None,
+        after: dict[str, object] | None = None,
+    ) -> None:
+        """Turn a pending row into the write's final state (applied or failed)."""
+        if status not in STATUSES:
+            raise ValueError(f"unknown ledger status: {status}")
+        self._db.execute(
+            "UPDATE actions SET status = ?, detail = ?, before = ?, after = ? WHERE id = ? AND status = ?",
+            (str(status), detail, _json_or_null(before), _json_or_null(after), row_id, Status.PENDING),
+        )
+        self._db.commit()
+
     def record(
         self,
         run_id: str,
@@ -123,7 +150,18 @@ class Ledger:
         """Store one applied or failed write; before/after (JSON) are the audited state around it."""
         if status not in STATUSES:
             raise ValueError(f"unknown ledger status: {status}")
-        self._db.execute(
+        self._insert(run_id, action, status, detail, before, after)
+
+    def _insert(
+        self,
+        run_id: str,
+        action: Action,
+        status: Status | str,
+        detail: str,
+        before: dict[str, object] | None,
+        after: dict[str, object] | None,
+    ) -> int:
+        cursor = self._db.execute(
             "INSERT INTO actions (run_id, rule, kind, rating_key, file_id, fid, eids, when_ts, status, detail,"
             " created_at, before, after) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -143,3 +181,6 @@ class Ledger:
             ),
         )
         self._db.commit()
+        if cursor.lastrowid is None:
+            raise RuntimeError("ledger insert returned no row id")
+        return cursor.lastrowid

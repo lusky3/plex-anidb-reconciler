@@ -1141,3 +1141,53 @@ def test_cli_silences_httpx_request_logs(env, monkeypatch):
     monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.NOTSET)
     cli.main(["plan"])
     assert logging.getLogger("httpx").level >= logging.WARNING
+
+
+# --- R1 crash window: the ledger holds a pending row before the scrobble is sent ---
+
+
+class _Killed(BaseException):
+    """Stands in for the process dying mid-request (nothing in the runner catches it)."""
+
+
+@respx.mock
+def test_r1_ledger_row_is_pending_while_the_scrobble_is_in_flight(env):
+    scrobble, _ = mock_servers()
+    db = Path(env["DATA_DIR"]) / "ledger.sqlite"
+    seen = []
+
+    def scrobble_handler(request):
+        seen.append(_query(db, "SELECT rating_key, status FROM actions WHERE kind = 'mark_plex_played'"))
+        return httpx.Response(200)
+
+    scrobble.mock(side_effect=scrobble_handler)
+    go(env, apply=True)
+    assert seen == [[("a", "pending")], [("a", "applied"), ("b", "pending")]]
+    assert _query(db, "SELECT rating_key, status FROM actions WHERE kind = 'mark_plex_played' ORDER BY id") == [
+        ("a", "applied"),
+        ("b", "applied"),
+    ]
+
+
+def test_killed_during_scrobble_still_blocks_the_scrobble_date(env):
+    """The process dies after Plex applied the scrobble but before the ledger row was finished. The pending row
+    still marks the item as the reconciler's, so its lastViewedAt never becomes an AniDB date."""
+    env["SHOKO_INDEX_TTL_MIN"] = "0"
+    files = [shoko_file(1, 1, 50)]
+    write_mylist(env, [snap(999, 50, "2023-03-01T21:00:00-05:00"), snap(1, 50, None)])
+    with respx.mock:
+        scrobble, _, _ = mock_world(files, [plex_item("a", 1, 0)])
+
+        def killed(request):
+            raise _Killed
+
+        scrobble.mock(side_effect=killed)
+        with pytest.raises(_Killed):
+            go(env, apply=True, now=R1_TIME)
+    write_mylist(env, [snap(1, 50, None)])
+    with respx.mock:
+        _, put, _ = mock_world(files, [plex_item("a", 1, 1, int(R1_TIME.timestamp()))])
+        res = go(env, apply=True, now=R1_TIME + timedelta(days=30))
+    assert put.call_count == 0
+    rows = [(r["rule"], r["reason"], r["status"]) for r in _csv_dicts(res.report_path)]
+    assert rows == [("R4", "plex_marked_by_reconciler", "reported")]

@@ -64,7 +64,8 @@ class Rule(StrEnum):
 
 
 class Status(StrEnum):
-    """Outcome of one action in a run (CSV ``status`` column; only APPLIED/FAILED reach the ledger)."""
+    """Outcome of one action in a run (CSV ``status`` column). The ledger holds APPLIED and FAILED rows, plus
+    PENDING for an R1 whose scrobble was sent but whose result never got recorded (a crash in between)."""
 
     APPLIED = "applied"
     FAILED = "failed"
@@ -73,6 +74,7 @@ class Status(StrEnum):
     CAPPED = "capped"
     SKIPPED = "skipped"
     SKIPPED_LEDGER = "skipped_ledger"
+    PENDING = "pending"  # ledger only: an R1 row written before its scrobble is sent, finished right after
 
 
 class R2bPolicy(StrEnum):
