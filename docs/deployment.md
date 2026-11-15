@@ -219,7 +219,9 @@ It answers 503 in three cases. `"loop": "stale"` means the poll loop died, or ha
 `"run_active_since"` (UTC) shows when it started; restart the container, since applied writes are already in the
 ledger. And once `HEALTH_MAX_FAILED_RUNS` runs in a row raised an error, had a failed write or found no snapshot, the
 body carries an `"unhealthy"` reason such as `3 consecutive failed runs (last: snapshot_unavailable)`. The next
-successful run clears it.
+successful run clears it. A failed write gets retried every run, so a single file that keeps failing keeps
+`/healthz` at 503 on its own: look for the `failed` rows, and their `detail`, in the latest report under
+`<state-dir>/reports/`.
 
 A snapshot that stays `stale` means Shoko's MyList sync isn't refreshing `mylist.json`, and R2/R2b wait until it
 does. `unavailable` means the file is missing, unreadable or malformed; the log line names the path and the problem.
@@ -235,7 +237,7 @@ backend, method, path and HTTP status or exception type.
 
 **Shutdown.** On SIGTERM, `serve` stops accepting triggers and tells an in-flight run to stop. No new write starts
 after that. A Shoko write still re-reading the file stops before its PUT, so at most one request is still in flight,
-and a request on the write path gives up after about 20 s. The interrupted rows come out `skipped` with `shutdown`
+and a request on the write path gives up after about 20–25 s for a normal-sized reply. The interrupted rows come out `skipped` with `shutdown`
 and get re-planned next run. `serve` waits up to `SHUTDOWN_GRACE_S` (25 s) for the run to end; a run that is still
 reading Plex or Shoko when the grace runs out gets cut off, which is harmless because it hasn't written anything yet.
 Keep Docker's `stop_grace_period` above `SHUTDOWN_GRACE_S`; the example compose file uses 30 s.
@@ -272,10 +274,15 @@ there only, if Shoko already matches). For an R1, mark the item unwatched in Ple
 stops the tool from making the same write again.
 
 Back up `<state-dir>` along with Shoko's database. If you lose `ledger.sqlite`, the tool forgets which items it
-marked and which files it wrote. R1 may then mark an item played once more. It also stops recognising the date of an
-earlier R1 scrobble as its own: should AniDB later stop showing that episode as watched, the scrobble date could be
-sent to AniDB as if it were a watch. Writes that already reached Shoko or AniDB stay protected, because the Shoko
-UserStats check and the snapshot still stop any overwrite.
+marked and which files it wrote, and R1 may mark an item played once more. Writes that already reached Shoko or
+AniDB stay protected, because the Shoko UserStats check and the snapshot still stop any overwrite.
+
+Losing the ledger also means the tool no longer knows that an item's Plex `lastViewedAt` is its own R1 scrobble.
+That date could only reach AniDB if all of these hold: the item has no Plex history row, Shoko has no watched date
+for the file, AniDB has since stopped showing the episode as watched, and Shoko imported the file before the
+scrobble. R2 never uses a `lastViewedAt` older than the file's import (`predates_file`), so a release imported after
+the scrobble is safe. A crash during the scrobble itself doesn't open this gap, because the R1 row is in the ledger
+as `pending` before the scrobble is sent.
 
 ## Out of scope
 

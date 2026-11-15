@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from plex_anidb_reconciler.config import Settings, parse_listen
+from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT, Settings, parse_listen
 from plex_anidb_reconciler.models import SnapshotState, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
@@ -295,7 +295,20 @@ def finish_shutdown(loop: threading.Thread, grace_s: float) -> bool:
     return True
 
 
+def warn_if_grace_too_short(settings: Settings) -> None:
+    """Warn when SHUTDOWN_GRACE_S can't cover one write-path request (connect + send + reply timeouts)."""
+    t = WRITE_PATH_TIMEOUT
+    needed = (t.connect or 0) + (t.write or 0) + (t.read or 0)
+    if settings.shutdown_grace_s < needed:
+        log.warning(
+            "SHUTDOWN_GRACE_S=%s is below %.0f s: a write in flight at shutdown may be cut off and go unrecorded",
+            settings.shutdown_grace_s,
+            needed,
+        )
+
+
 def serve(settings: Settings) -> None:
+    warn_if_grace_too_short(settings)
     host, port = parse_listen(settings.listen)
     service = Service(settings)
     server = make_server(service, host, port)

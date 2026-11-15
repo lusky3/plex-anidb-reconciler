@@ -34,8 +34,8 @@ A run counts as failed for `HEALTH_MAX_FAILED_RUNS` when it raises an error, has
 MyList snapshot. One successful run resets the count.
 
 A request on the write path (the re-reads right before a write, the Shoko PUT, the Plex scrobble) gives up after
-about 20 seconds: 5 s to connect, 5 s to send, 10 s waiting for the reply. The default `SHUTDOWN_GRACE_S` of 25
-leaves room for one of them. The reads that plan a run wait up to 60 s for data, since a big Shoko file index can take
+about 20–25 s for a normal-sized reply: 5 s to connect, 5 s to send, and 10 s for each wait on the reply. The default
+`SHUTDOWN_GRACE_S` of 25 leaves room for one of them, and `serve` logs a warning at startup if you set it below 20. The reads that plan a run wait up to 60 s for data, since a big Shoko file index can take
 a while.
 
 An invalid value stops the program with exit code 1 and a config error that names the variable, never its value.

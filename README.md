@@ -28,8 +28,9 @@ has as watched, that file gets its own view date (rule R2b), and the date on the
 
 - Ambiguous paths and episode links get reported, not acted on. A Plex item backed by several files never reaches
   AniDB; it's marked played in Plex only when AniDB already shows all its episodes watched.
-- `plan` is a dry run; only `apply` and `serve` write. A ledger records each write's before and after state, though
-  a write cut off by a hard kill (SIGKILL) between the API call and the ledger entry goes unrecorded.
+- `plan` is a dry run; only `apply` and `serve` write. A ledger records each write's before and after state. A Shoko
+  write cut off between the API call and its ledger entry goes unrecorded, whether by a hard kill (SIGKILL) or by
+  `SHUTDOWN_GRACE_S` running out; an R1 cut off the same way stays in the ledger as `pending`.
 
 ## Requirements
 

@@ -818,3 +818,15 @@ def test_serve_real_client_errors_log_no_secrets(tmp_path, caplog):
     assert "reconcile run failed: Plex GET /library/sections/4/all returned HTTP 401" in caplog.text
     assert "PLEXSECRET" not in caplog.text and "SHOKOSECRET" not in caplog.text
     assert svc.health()["failed_runs"] == 2
+
+
+# --- a shutdown grace shorter than one write-path request is warned about at startup ---
+
+
+@pytest.mark.parametrize("grace,warned", [(0, True), (19, True), (20, False), (25, False)])
+def test_short_shutdown_grace_logs_a_startup_warning(caplog, grace, warned):
+    from plex_anidb_reconciler.serve import warn_if_grace_too_short
+
+    with caplog.at_level("WARNING"):
+        warn_if_grace_too_short(SimpleNamespace(shutdown_grace_s=grace))
+    assert ("SHUTDOWN_GRACE_S" in caplog.text) is warned
