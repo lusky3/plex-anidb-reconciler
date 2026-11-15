@@ -249,7 +249,9 @@ run failed or the command line was invalid, and `3` when the MyList snapshot is 
 backend, method, path and HTTP status or exception type, never secrets or query strings.
 
 **Network.** `/trigger` has no authentication. Keep port 8787 unpublished and reachable only on the Docker network.
-The web UI listens on its own port (below), so exposing it doesn't expose `/trigger`.
+The web UI listens on its own port (below), so exposing it doesn't expose `/trigger`. Each port serves at most 32
+connections at once and closes any client that takes longer than 30 s to send its request, so a slow or stuck
+client can't tie up the service.
 
 ## Web UI
 

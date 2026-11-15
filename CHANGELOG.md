@@ -12,7 +12,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before and after state. It runs on its own port, needs `UI_TOKEN` on every request, never writes, and never calls
   Plex, Shoko or AniDB.
 - Each run writes `reports/<run_id>.json` next to its CSV, recording plan or apply, the run's scope and the snapshot
-  state.
+  state. The CSV is renamed into place after that file exists, so nothing ever reads a half-written report.
+
+### Changed
+
+- The `/trigger` and `/healthz` port now serves at most 32 connections at once and drops a client that hasn't sent
+  its whole request within 30 s. Before, a client sending headers slowly could hold a thread indefinitely.
 
 ## [0.1.0] - 2026-11-14
 

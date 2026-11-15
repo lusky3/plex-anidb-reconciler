@@ -9,15 +9,15 @@ import ipaddress
 import json
 import logging
 import signal
-import socket
 import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 
 from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT, Settings, parse_listen
+from plex_anidb_reconciler.httpd import QuietHandler, bind
 from plex_anidb_reconciler.models import SnapshotState, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
@@ -192,9 +192,7 @@ def trigger_rating_key(body: bytes) -> str | None:
 
 
 def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
-        timeout = 10  # a stalled client cannot pin a handler thread
-
+    class Handler(QuietHandler):
         def _json(self, code: int, body: dict, close: bool = False) -> None:
             data = json.dumps(body).encode()
             self.send_response(code)
@@ -247,19 +245,7 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
             else:
                 self._json(404, {"error": "not found"})
 
-        def log_message(self, format: str, *args) -> None:
-            # Intentionally empty: silences BaseHTTPRequestHandler's per-request stderr access log
-            # (one line per /healthz probe). Runs are logged by the service itself.
-            pass
-
-    server_cls = ThreadingHTTPServer
-    if ":" in host:  # IPv6 literal (LISTEN=[addr]:port)
-
-        class V6Server(ThreadingHTTPServer):
-            address_family = socket.AF_INET6
-
-        server_cls = V6Server
-    return server_cls((host, port), Handler)
+    return bind(host, port, Handler)
 
 
 def health_url(listen: str | None) -> str:

@@ -23,7 +23,7 @@ Every setting comes from an environment variable.
 | `HEALTH_MAX_FAILED_RUNS` | `3` | This many failed runs in a row make `/healthz` return 503 (>= 1) |
 | `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0); keep it at 20 or more |
 | `UI_LISTEN` | empty | Address of the read-only web UI, e.g. `0.0.0.0:8788`; empty turns it off |
-| `UI_TOKEN` | required with `UI_LISTEN` | Password for the web UI (secret), at least 32 characters |
+| `UI_TOKEN` | required with `UI_LISTEN` | Password for the web UI (secret): at least 32 printable ASCII characters |
 
 Required variables must be set and non-blank. A blank optional variable falls back to its default, with one
 exception: a blank `SHOKO_TZ` is an error.

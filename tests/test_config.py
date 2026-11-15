@@ -234,6 +234,8 @@ def test_ui_settings_accepted_and_token_kept_out_of_repr():
         ({"UI_LISTEN": "[::1]:9000", "LISTEN": "0.0.0.0:9000", "UI_TOKEN": UI_TOKEN}, "different port"),
         ({"UI_LISTEN": "0.0.0.0:8788"}, "UI_TOKEN must be set to at least 32 characters"),
         ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "t" * 31}, "UI_TOKEN must be set to at least 32"),
+        ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "é" * 32}, "UI_TOKEN must be printable ASCII"),
+        ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "a\x07" * 16}, "UI_TOKEN must be printable ASCII"),
     ],
 )
 def test_ui_settings_rejected_without_echoing_values(env, expected):

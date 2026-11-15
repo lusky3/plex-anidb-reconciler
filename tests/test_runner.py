@@ -944,17 +944,49 @@ def test_csv_is_published_last_so_readers_never_see_a_partial_report(env, monkey
 
     mock_servers()
     seen = []
-    real_meta = runner.write_run_meta
+    real_write = runner.RunMeta.write
 
-    def meta_then_check(path, meta):
-        real_meta(path, meta)
+    def meta_then_check(meta, path):
+        real_write(meta, path)
         seen.append(path.with_suffix(".csv").exists())
 
-    monkeypatch.setattr(runner, "write_run_meta", meta_then_check)
+    monkeypatch.setattr(runner.RunMeta, "write", meta_then_check)
     res = go(env, apply=False)
     assert seen == [False]  # the CSV wasn't visible yet when the meta file was written
     assert res.report_path.exists()
     assert not list(res.report_path.parent.glob("*.partial"))
+
+
+@respx.mock
+def test_a_failed_meta_write_leaves_no_partial_csv(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    mock_servers()
+
+    def fail(meta, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner.RunMeta, "write", fail)
+    with pytest.raises(OSError):
+        go(env, apply=False)
+    reports = Path(env["DATA_DIR"]) / "reports"
+    assert not list(reports.glob("*.partial")) and not list(reports.glob("*.csv"))
+
+
+@respx.mock
+def test_a_failed_html_write_keeps_the_csv(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    mock_servers()
+
+    def fail(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "write_html_report", fail)
+    with pytest.raises(OSError):
+        go(env, apply=False)
+    reports = Path(env["DATA_DIR"]) / "reports"
+    assert len(list(reports.glob("*.csv"))) == 1 and len(list(reports.glob("*.json"))) == 1
 
 
 @respx.mock

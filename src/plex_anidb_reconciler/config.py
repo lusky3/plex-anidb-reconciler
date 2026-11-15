@@ -3,6 +3,7 @@
 import ipaddress
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -106,6 +107,9 @@ def _ui_settings(env: Mapping[str, str], listen: str) -> tuple[str, str]:
     token = (env.get("UI_TOKEN") or "").strip()
     if len(token) < UI_TOKEN_MIN_LEN:
         raise ValueError(f"UI_TOKEN must be set to at least {UI_TOKEN_MIN_LEN} characters when UI_LISTEN is set")
+    if not token.isascii() or not token.isprintable():
+        # HTTP headers arrive as latin-1: a non-ASCII token could never match as a Bearer token
+        raise ValueError("UI_TOKEN must be printable ASCII")
     return ui_listen, token
 
 
@@ -131,6 +135,14 @@ class Settings:
     health_max_failed_runs: int = 3  # this many failed runs in a row make /healthz return 503
     ui_listen: str = ""  # read-only web UI address; empty = no UI
     ui_token: str = field(default="", repr=False)  # required with ui_listen
+
+    @property
+    def reports_dir(self) -> Path:
+        return Path(self.data_dir) / "reports"
+
+    @property
+    def ledger_path(self) -> Path:
+        return Path(self.data_dir) / "ledger.sqlite"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:

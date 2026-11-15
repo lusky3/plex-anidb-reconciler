@@ -14,21 +14,23 @@ import html
 import json
 import logging
 import re
-import socket
 import sqlite3
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.httpd import BoundedServer, QuietHandler, bind
+from plex_anidb_reconciler.models import SnapshotState, Status
 from plex_anidb_reconciler.mylist import SnapshotError, snapshot_age, snapshot_is_fresh
-from plex_anidb_reconciler.report import COLUMNS
+from plex_anidb_reconciler.report import COLUMNS, RunMeta, csv_cell_value
+from plex_anidb_reconciler.runner import EXECUTABLE_RULES, KEEP_REPORTS
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ RUN_ID = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
 PAGE_ROWS = 200
 MAX_PARAM = 200  # longer query values are cut; every filter is an exact match on a short value
 RECENT_RUNS = 10
+LEDGER_STATUSES = (Status.APPLIED, Status.FAILED, Status.PENDING)
 
 # What a reason means and what to do about it (docs/how-it-works.md, "Reason codes").
 REASONS: dict[str, tuple[str, str]] = {
@@ -69,41 +72,58 @@ REASONS: dict[str, tuple[str, str]] = {
 }
 
 _STYLE = """
-:root{--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6b66;--line:#deded8;--head:#f0f0ec;--accent:#2f5d8a;
---ok:#2e7d4f;--warn:#a66a00;--bad:#b3261e;--chip:#ecece6}
-@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#e8e8e3;--muted:#9a9a93;--line:#34342f;
---head:#1f1f1d;--accent:#8db4dc;--ok:#6cc08f;--warn:#e0a84a;--bad:#f08a80;--chip:#2a2a27}}
+:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#1d1d1b;--muted:#5f5f5a;--line:#deded8;--field:#8a8a83;
+--head:#f0f0ec;--sel:#e6ecf2;--accent:#2f5d8a;--ok:#25683f;--warn:#8a5700;--bad:#b3261e;--chip:#ecece6}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#e8e8e3;--muted:#a3a39c;--line:#34342f;--field:#6e6e67;
+--head:#1f1f1d;--sel:#1e2a36;--accent:#8db4dc;--ok:#6cc08f;--warn:#e0a84a;--bad:#f08a80;--chip:#2a2a27}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;
+font-variant-numeric:tabular-nums}
 header{display:flex;flex-wrap:wrap;gap:.25rem 1.25rem;align-items:baseline;padding:.8rem 16px;
 border-bottom:1px solid var(--line)}
 header strong{font-size:1.05rem;letter-spacing:.02em}
-nav a{margin-right:1rem}
+header nav{display:flex;flex-wrap:wrap;gap:0 1rem}
+header nav a{padding:.2rem 0}
+nav a[aria-current]{color:var(--fg);font-weight:600}
 main{padding:0 16px 2rem;max-width:1400px}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-h1{font-size:1.3rem;margin:1.2rem 0 .4rem}h2{font-size:1.05rem;margin:1.6rem 0 .4rem}
+h1{font-size:1.35rem;margin:1.2rem 0 .4rem;text-wrap:balance}h2{font-size:1.05rem;margin:1.6rem 0 .4rem}
+p.note{max-width:75ch;text-wrap:pretty}
 p.note,.muted{color:var(--muted)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.8rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(19rem,1fr));gap:.8rem}
 .card{border:1px solid var(--line);border-radius:6px;padding:.7rem .9rem}
 .card h2{margin:0 0 .4rem;font-size:.95rem}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.15rem .9rem;margin:0}
-dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}
-.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:6px}
+dt{color:var(--muted)}dd{margin:0;overflow-wrap:break-word;min-width:0}
+dd a{display:inline-block;min-width:1.5rem}
+.wrap{overflow:auto;max-height:calc(100vh - 7rem);border:1px solid var(--line);border-radius:6px}
 table{border-collapse:collapse;font-size:.85rem;width:100%}
 th,td{padding:.3rem .55rem;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line);
 vertical-align:top}
-th{background:var(--head);position:sticky;top:0}
+th{background:var(--head);position:sticky;top:0;z-index:1}
 td.wide{white-space:normal;min-width:16rem}
+td.num,th.num{text-align:right}
+tr.sel td{background:var(--sel)}
 tr:last-child td{border-bottom:0}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
 .chip{display:inline-block;background:var(--chip);border-radius:3px;padding:0 .35rem;margin:0 .2rem .2rem 0}
-form.filters{display:flex;flex-wrap:wrap;gap:.5rem;align-items:end;margin:.6rem 0}
+form.filters{display:flex;flex-wrap:wrap;gap:.5rem .75rem;align-items:end;margin:.6rem 0}
 form.filters label{display:flex;flex-direction:column;font-size:.8rem;color:var(--muted)}
-input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);
+input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--field);
 border-radius:4px;padding:.25rem .4rem}
 button{cursor:pointer}
+@media (pointer:coarse){input,select,button{min-height:2.75rem}}
 .pager{margin:.6rem 0;display:flex;gap:1rem}
-pre{margin:0;font-size:.8rem;white-space:pre-wrap}
+pre{margin:0;font:.8rem/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (max-width:40rem){
+.wrap.stack{max-height:none;overflow:visible;border:0}
+table.stack thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+table.stack,table.stack tbody,table.stack tr,table.stack td{display:block}
+table.stack tr{border:1px solid var(--line);border-radius:6px;margin-bottom:.5rem;padding:.3rem 0}
+table.stack td{display:flex;gap:.6rem;border:0;white-space:normal;padding:.1rem .6rem;text-align:left}
+table.stack td::before{content:attr(data-label);color:var(--muted);min-width:7rem;flex:none}
+}
 """
 
 _SECURITY_HEADERS = {
@@ -117,6 +137,9 @@ _SECURITY_HEADERS = {
 }
 
 
+# --- formatting ------------------------------------------------------------------------------------------------
+
+
 def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
@@ -125,19 +148,23 @@ def run_started(run_id: str) -> datetime:
     return datetime.strptime(run_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
 
 
-def fmt_time(value: datetime | str | None) -> str:
-    if value in (None, ""):
+def fmt_time(value: object) -> str:
+    """A datetime or ISO string as ``YYYY-MM-DD HH:MM UTC``; other text is returned as is."""
+    if value is None or value == "":
         return ""
     if isinstance(value, str):
         try:
             value = datetime.fromisoformat(value)
         except ValueError:
             return value
+    if not isinstance(value, datetime):
+        return str(value)
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def fmt_delta(delta: timedelta) -> str:
-    seconds = int(abs(delta).total_seconds())
+def fmt_age(age: timedelta) -> str:
+    """How long ago (positive ``age``) or how far ahead (negative, prefixed "in ") something is."""
+    seconds = int(abs(age).total_seconds())
     days, rest = divmod(seconds, 86400)
     hours, rest = divmod(rest, 3600)
     minutes = rest // 60
@@ -147,7 +174,7 @@ def fmt_delta(delta: timedelta) -> str:
         text = f"{hours} h {minutes} min"
     else:
         text = f"{minutes} min"
-    return text if delta >= timedelta(0) else f"in {text}"
+    return text if age >= timedelta(0) else f"in {text}"
 
 
 # --- run reports -----------------------------------------------------------------------------------------------
@@ -156,11 +183,9 @@ def fmt_delta(delta: timedelta) -> str:
 @dataclass(frozen=True)
 class RunSummary:
     run_id: str
-    mode: str  # apply | plan | ? (an old report without a meta file and no telling rows)
-    full: bool | None  # True: the report lists every item; False: a scoped /trigger run; None: unknown
-    snapshot: str  # ok | stale | unavailable | "" (unknown)
-    statuses: Counter = field(default_factory=Counter)
-    reasons: Counter = field(default_factory=Counter)  # (rule, reason) of reported rows
+    meta: RunMeta | None  # None: a report from before meta files existed
+    statuses: Counter[str] = field(default_factory=Counter)
+    reasons: Counter[tuple[str, str]] = field(default_factory=Counter)  # (rule, reason) of reported rows
     rows: int = 0
     unreadable: bool = False
 
@@ -169,25 +194,57 @@ class RunSummary:
         return run_started(self.run_id)
 
     @property
+    def mode(self) -> str:
+        """apply | plan | ? (no meta file and no row that tells)."""
+        if self.meta is not None:
+            return self.meta.mode
+        if self.statuses.get(Status.DRY_RUN):
+            return "plan"
+        if any(self.statuses.get(s) for s in (Status.APPLIED, Status.FAILED, Status.CAPPED)):
+            return "apply"
+        return "?"
+
+    @property
+    def snapshot(self) -> str:
+        return self.meta.snapshot if self.meta is not None else ""
+
+    @property
     def scope(self) -> str:
-        return {True: "full", False: "scoped", None: "?"}[self.full]
+        if self.meta is None:
+            return "?"
+        return "full" if self.meta.full else "scoped"
 
+    @property
+    def scope_label(self) -> str:
+        """The scope plus any write limits, e.g. ``scoped · rules R1,R2 · file 7``."""
+        parts = [self.scope]
+        if self.meta is not None and self.meta.rules:
+            parts.append("rules " + ",".join(self.meta.rules))
+        if self.meta is not None and self.meta.file_id is not None:
+            parts.append(f"file {self.meta.file_id}")
+        return " · ".join(parts)
 
-def _infer_mode(statuses: Counter) -> str:
-    if statuses.get("dry_run"):
-        return "plan"
-    if statuses.get("applied") or statuses.get("failed") or statuses.get("capped"):
-        return "apply"
-    return "?"
+    @property
+    def lists_everything(self) -> bool:
+        """Whether the report lists every Plex item, so its reported rows compare with another run's. A report
+        without a meta file counts only if it has rows and tells its mode; it may still be a scoped run, which
+        nothing in it records."""
+        if self.unreadable:
+            return False
+        if self.meta is not None:
+            return self.meta.full and self.meta.snapshot != SnapshotState.UNAVAILABLE
+        return self.rows > 0 and self.mode != "?"
 
 
 class Reports:
-    """The run reports under one directory. Summaries are cached per file version (size and mtime)."""
+    """The run reports under one directory. Summaries are cached per version of the CSV and its meta file (size
+    and mtime); each is built once even when several requests ask for it at the same time."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self._cache: dict[str, tuple[tuple, RunSummary]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # guards _cache
+        self._build_lock = threading.Lock()  # one summary build at a time, so a cold cache doesn't stampede
 
     def run_ids(self) -> list[str]:
         """Run ids with a CSV report, newest first."""
@@ -200,18 +257,14 @@ class Reports:
     def csv_path(self, run_id: str) -> Path:
         return self.directory / f"{run_id}.csv"
 
-    def meta(self, run_id: str) -> dict:
-        try:
-            data = json.loads((self.directory / f"{run_id}.json").read_text(encoding="utf-8"))
-        except OSError, ValueError:
-            return {}
-        return data if isinstance(data, dict) else {}
+    def _meta_path(self, run_id: str) -> Path:
+        return self.directory / f"{run_id}.json"
 
     def rows(self, run_id: str) -> list[dict[str, str]] | None:
-        """The CSV rows of a run, or None if the report can't be read."""
+        """The CSV rows of a run with their original values, or None if the report can't be read."""
         try:
             with self.csv_path(run_id).open(newline="", encoding="utf-8") as fh:
-                return [{c: (row.get(c) or "") for c in COLUMNS} for row in csv.DictReader(fh)]
+                return [{c: csv_cell_value(row.get(c) or "") for c in COLUMNS} for row in csv.DictReader(fh)]
         except OSError, csv.Error, UnicodeDecodeError:
             return None
 
@@ -221,53 +274,77 @@ class Reports:
         except OSError:
             return None
         try:
-            meta_mtime = (self.directory / f"{run_id}.json").stat().st_mtime_ns
+            meta_mtime = self._meta_path(run_id).stat().st_mtime_ns
         except OSError:
             meta_mtime = None
         return (st.st_size, st.st_mtime_ns, meta_mtime)
+
+    def _cached(self, run_id: str, version: tuple) -> RunSummary | None:
+        with self._lock:
+            hit = self._cache.get(run_id)
+        return hit[1] if hit and hit[0] == version else None
 
     def summary(self, run_id: str) -> RunSummary | None:
         version = self._version(run_id)
         if version is None:
             return None
-        with self._lock:
-            cached = self._cache.get(run_id)
-        if cached and cached[0] == version:
-            return cached[1]
-        summary = self._summarize(run_id)
-        with self._lock:
-            self._cache[run_id] = (version, summary)
+        if (hit := self._cached(run_id, version)) is not None:
+            return hit
+        with self._build_lock:
+            if (hit := self._cached(run_id, version)) is not None:  # built while this request waited
+                return hit
+            summary = self._summarize(run_id)
+            if not summary.unreadable:  # a read can fail transiently (e.g. EMFILE): try again next time
+                with self._lock:
+                    self._cache[run_id] = (version, summary)
         return summary
 
     def _summarize(self, run_id: str) -> RunSummary:
-        meta = self.meta(run_id)
         rows = self.rows(run_id)
-        statuses: Counter = Counter(r["status"] for r in rows or ())
-        reasons: Counter = Counter((r["rule"], r["reason"]) for r in rows or () if r["status"] == "reported")
-        full = meta.get("full")
         return RunSummary(
             run_id=run_id,
-            mode=meta.get("mode") if meta.get("mode") in ("apply", "plan") else _infer_mode(statuses),
-            full=full if isinstance(full, bool) else None,
-            snapshot=str(meta.get("snapshot") or ""),
-            statuses=statuses,
-            reasons=reasons,
+            meta=RunMeta.load(self._meta_path(run_id)),
+            statuses=Counter(r["status"] for r in rows or ()),
+            reasons=Counter((r["rule"], r["reason"]) for r in rows or () if r["status"] == Status.REPORTED),
             rows=len(rows or ()),
             unreadable=rows is None,
         )
 
     def summaries(self, limit: int | None = None) -> list[RunSummary]:
         all_ids = self.run_ids()
-        with self._lock:
-            for gone in set(self._cache) - set(all_ids):  # pruned reports
-                del self._cache[gone]
+        self._forget_except(all_ids)
         ids = all_ids[:limit] if limit else all_ids
         return [s for s in (self.summary(i) for i in ids) if s is not None]
 
+    def _forget_except(self, run_ids: Iterable[str]) -> None:
+        """Drop cached summaries of reports that have been pruned."""
+        keep = set(run_ids)
+        with self._lock:
+            for gone in set(self._cache) - keep:
+                del self._cache[gone]
+
     def full_runs(self) -> list[RunSummary]:
-        """Readable runs that list every item and had a snapshot, newest first. Runs from before meta files
-        existed count as full, since nothing says otherwise."""
-        return [s for s in self.summaries() if s.full is not False and s.snapshot != "unavailable" and not s.unreadable]
+        """Runs whose reports list every item, newest first."""
+        return [s for s in self.summaries() if s.lists_everything]
+
+
+@dataclass(frozen=True)
+class ReasonCount:
+    rule: str
+    reason: str
+    count: int
+    change: int | None  # against the previous full run; None without one
+
+
+def reason_changes(latest: RunSummary, previous: RunSummary | None) -> list[ReasonCount]:
+    """Reported rows per (rule, reason) of ``latest`` with the change since ``previous``, most items first. A
+    reason of ``previous`` that dropped to zero stays in the list, so a fully fixed problem shows up."""
+    before = previous.reasons if previous is not None else Counter()
+    out = []
+    for key in set(latest.reasons) | set(before):
+        count = latest.reasons.get(key, 0)
+        out.append(ReasonCount(key[0], key[1], count, None if previous is None else count - before.get(key, 0)))
+    return sorted(out, key=lambda r: (-r.count, r.rule, r.reason))
 
 
 # --- ledger ------------------------------------------------------------------------------------------------------
@@ -293,52 +370,63 @@ _LEDGER_WHERE = (
     " WHERE (?1 IS NULL OR run_id = ?1) AND (?2 IS NULL OR rule = ?2) AND (?3 IS NULL OR status = ?3)"
     " AND (?4 IS NULL OR rating_key = ?4) AND (?5 IS NULL OR file_id = ?5)"
 )
-_LEDGER_SELECT = "SELECT " + ", ".join(LEDGER_COLUMNS) + " FROM actions" + _LEDGER_WHERE + " ORDER BY id DESC"
-_LEDGER_PAGE = _LEDGER_SELECT + " LIMIT ?6 OFFSET ?7"
+_LEDGER_PAGE = (
+    "SELECT " + ", ".join(LEDGER_COLUMNS) + " FROM actions" + _LEDGER_WHERE + " ORDER BY id DESC LIMIT ?6 OFFSET ?7"
+)
 _LEDGER_COUNT = "SELECT COUNT(*) FROM actions" + _LEDGER_WHERE
 _LEDGER_STATUS_COUNTS = "SELECT status, COUNT(*) FROM actions GROUP BY status"
 LEDGER_FILTERS = ("run_id", "rule", "status", "rating_key", "file_id")
+_INT64_DIGITS = 18  # longer digit strings may not fit SQLite's 64-bit integer
 
 
 class LedgerUnavailable(Exception):
     """The ledger file is missing or can't be read."""
 
 
+def _as_file_id(raw: str) -> int:
+    """A file_id filter as an integer; text that isn't a plain number of at most 18 digits matches nothing (-1)."""
+    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= _INT64_DIGITS else -1
+
+
 class LedgerView:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         if not self.path.is_file():
             raise LedgerUnavailable("no ledger yet: it appears after the first applied write")
+        conn = None
         try:
             conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
             conn.execute("PRAGMA query_only = ON")
-        except sqlite3.Error as exc:
-            raise LedgerUnavailable(f"ledger unreadable ({type(exc).__name__})") from None
-        return conn
-
-    def _run(self, fn: Callable[[sqlite3.Connection], object]) -> object:
-        conn = self._connect()
-        try:
-            return fn(conn)
+            yield conn
         except sqlite3.Error as exc:
             raise LedgerUnavailable(f"ledger unreadable ({type(exc).__name__})") from None
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def status_counts(self) -> dict[str, int]:
-        return dict(self._run(lambda c: c.execute(_LEDGER_STATUS_COUNTS).fetchall()))  # type: ignore[arg-type]
+        with self._connection() as conn:
+            return dict(conn.execute(_LEDGER_STATUS_COUNTS).fetchall())
 
-    def query(self, filters: Mapping[str, object], offset: int, limit: int = PAGE_ROWS) -> tuple[list[dict], int]:
-        params = tuple(filters.get(name) for name in LEDGER_FILTERS)
+    def count(self, filters: Mapping[str, str]) -> int:
+        with self._connection() as conn:
+            return conn.execute(_LEDGER_COUNT, self._params(filters)).fetchone()[0]
 
-        def fetch(conn: sqlite3.Connection) -> tuple[list[dict], int]:
-            rows = conn.execute(_LEDGER_PAGE, (*params, limit, offset)).fetchall()
-            total = conn.execute(_LEDGER_COUNT, params).fetchone()[0]
-            return [dict(zip(LEDGER_COLUMNS, row, strict=True)) for row in rows], total
+    def rows(self, filters: Mapping[str, str], offset: int, limit: int = PAGE_ROWS) -> list[dict[str, object]]:
+        """One page of rows matching ``filters`` (exact matches; absent keys don't filter), newest first."""
+        with self._connection() as conn:
+            rows = conn.execute(_LEDGER_PAGE, (*self._params(filters), limit, offset)).fetchall()
+        return [dict(zip(LEDGER_COLUMNS, row, strict=True)) for row in rows]
 
-        return self._run(fetch)  # type: ignore[return-value]
+    @staticmethod
+    def _params(filters: Mapping[str, str]) -> tuple[object, ...]:
+        values: list[object] = [filters.get(name) or None for name in LEDGER_FILTERS]
+        if filters.get("file_id"):
+            values[LEDGER_FILTERS.index("file_id")] = _as_file_id(filters["file_id"])
+        return tuple(values)
 
 
 # --- request helpers -------------------------------------------------------------------------------------------
@@ -371,9 +459,24 @@ def query_params(raw_query: str) -> dict[str, str]:
     return {k: v[0].strip()[:MAX_PARAM] for k, v in parsed.items() if v and v[0].strip()}
 
 
-def page_number(params: Mapping[str, str]) -> int:
-    raw = params.get("page", "1")
-    return int(raw) if raw.isascii() and raw.isdigit() and 0 < int(raw) < 100_000 else 1
+@dataclass(frozen=True)
+class Page:
+    number: int  # 1-based, clamped to the last page
+    pages: int
+
+    @classmethod
+    def of(cls, params: Mapping[str, str], total: int) -> Page:
+        pages = max((total + PAGE_ROWS - 1) // PAGE_ROWS, 1)
+        raw = params.get("page", "1")
+        number = int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 6 else 1
+        return cls(min(max(number, 1), pages), pages)
+
+    @property
+    def offset(self) -> int:
+        return (self.number - 1) * PAGE_ROWS
+
+    def take[T](self, items: Sequence[T]) -> Sequence[T]:
+        return items[self.offset : self.offset + PAGE_ROWS]
 
 
 def link(path: str, params: Mapping[str, object] | None = None) -> str:
@@ -381,18 +484,20 @@ def link(path: str, params: Mapping[str, object] | None = None) -> str:
     return esc(path + ("?" + urlencode(clean) if clean else ""))
 
 
-def anidb_link(kind: str, value: str) -> str:
-    if not (value.isascii() and value.isdigit()):
-        return esc(value)
-    return f'<a href="https://anidb.net/{kind}/{value}" rel="noreferrer noopener">{esc(value)}</a>'
+def anidb_link(kind: str, value: object) -> str:
+    text = "" if value is None else str(value)
+    if not (text.isascii() and text.isdigit()):
+        return esc(text)
+    return f'<a href="https://anidb.net/{kind}/{text}" rel="noreferrer noopener">{esc(text)}</a>'
 
 
 def status_class(status: str) -> str:
-    if status in ("applied", "ok", "fresh"):
+    if status in (Status.APPLIED, SnapshotState.OK, "fresh"):
         return "ok"
-    if status in ("failed", "stale", "unavailable", "pending") or status.startswith("error"):
+    bad = (Status.FAILED, Status.PENDING, SnapshotState.STALE, SnapshotState.UNAVAILABLE)
+    if status in bad or status.startswith(("error", "snapshot_")):
         return "bad"
-    if status in ("capped", "skipped", "skipped_ledger"):
+    if status in (Status.CAPPED, Status.SKIPPED, Status.SKIPPED_LEDGER):
         return "warn"
     return ""
 
@@ -409,53 +514,229 @@ def counts_html(counts: Mapping[str, int]) -> str:
     return "".join(f'<span class="chip">{badge(k)} {v}</span>' for k, v in sorted(counts.items()))
 
 
-def table(headers: Iterable[str], rows: Iterable[Iterable[str]], wide: Iterable[int] = ()) -> str:
-    """An HTML table; cells are already-escaped HTML. Columns listed in ``wide`` may wrap."""
-    wide = set(wide)
-    head = "".join(f"<th>{esc(h)}</th>" for h in headers)
-    body = "".join(
-        "<tr>"
-        + "".join(f'<td class="wide">{c}</td>' if i in wide else f"<td>{c}</td>" for i, c in enumerate(r))
-        + "</tr>"
-        for r in rows
-    )
-    if not body:
-        return '<p class="note">Nothing to show.</p>'
-    return f'<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+@dataclass(frozen=True)
+class Table:
+    """An HTML table whose cells are already-escaped HTML."""
+
+    caption: str
+    headers: Sequence[str]
+    wide: frozenset[int] = frozenset()  # columns that may wrap
+    num: frozenset[int] = frozenset()  # right-aligned numeric columns
+    stack: bool = False  # on a phone, show each row as a labelled block
+
+    def render(self, rows: Iterable[Sequence[str]], *, empty: str = "Nothing to show.", selected: int = -1) -> str:
+        body = "".join(self._row(cells, i == selected) for i, cells in enumerate(rows))
+        if not body:
+            return f'<p class="note">{empty}</p>'
+        head = "".join(f"<th{self._class(i)}>{esc(h)}</th>" for i, h in enumerate(self.headers))
+        stack = " stack" if self.stack else ""
+        return (
+            f'<div class="wrap{stack}"><table class="report{stack}">'
+            f'<caption class="vh">{esc(self.caption)}</caption><thead><tr>{head}</tr></thead>'
+            f"<tbody>{body}</tbody></table></div>"
+        )
+
+    def _class(self, i: int) -> str:
+        names = [name for name, cols in (("wide", self.wide), ("num", self.num)) if i in cols]
+        return f' class="{" ".join(names)}"' if names else ""
+
+    def _row(self, cells: Sequence[str], selected: bool) -> str:
+        if self.stack:  # the label (::before) and one span: two flex items however many parts the cell has
+            tds = "".join(
+                f'<td{self._class(i)} data-label="{esc(self.headers[i])}"><span>{c}</span></td>'
+                for i, c in enumerate(cells)
+            )
+        else:
+            tds = "".join(f"<td{self._class(i)}>{c}</td>" for i, c in enumerate(cells))
+        return f'<tr class="sel">{tds}</tr>' if selected else f"<tr>{tds}</tr>"
 
 
-def select(name: str, options: Iterable[str], current: str) -> str:
+def select(name: str, label: str, options: Iterable[str], current: str) -> str:
     opts = ['<option value="">any</option>'] + [
         f'<option value="{esc(o)}"{" selected" if o == current else ""}>{esc(o)}</option>' for o in options
     ]
-    return f'<label>{esc(name)}<select name="{esc(name)}">{"".join(opts)}</select></label>'
+    return f'<label>{esc(label)}<select name="{esc(name)}">{"".join(opts)}</select></label>'
 
 
-def text_input(name: str, current: str) -> str:
-    return f'<label>{esc(name)}<input name="{esc(name)}" value="{esc(current)}" size="12"></label>'
+def text_input(name: str, label: str, current: str) -> str:
+    return f'<label>{esc(label)}<input name="{esc(name)}" value="{esc(current)}" size="12"></label>'
 
 
 def filter_form(action: str, fields: Iterable[str]) -> str:
     return (
         f'<form class="filters" method="get" action="{esc(action)}">{"".join(fields)}'
-        f'<button type="submit">Filter</button> <a href="{esc(action)}">clear</a></form>'
+        f'<button type="submit">Filter</button> <a href="{esc(action)}">Clear filters</a></form>'
     )
 
 
-def pager(path: str, params: Mapping[str, str], page: int, total: int) -> str:
-    pages = max((total + PAGE_ROWS - 1) // PAGE_ROWS, 1)
-    if pages == 1:
+def no_match(path: str) -> str:
+    return f'No rows match these filters. <a href="{esc(path)}">Clear filters</a>'
+
+
+def pager(path: str, params: Mapping[str, str], page: Page) -> str:
+    if page.pages == 1:
         return ""
     parts = []
-    if page > 1:
-        parts.append(f'<a href="{link(path, {**params, "page": page - 1})}">previous</a>')
-    parts.append(f'<span class="muted">page {page} of {pages}</span>')
-    if page < pages:
-        parts.append(f'<a href="{link(path, {**params, "page": page + 1})}">next</a>')
-    return f'<div class="pager">{"".join(parts)}</div>'
+    if page.number > 1:
+        parts.append(f'<a href="{link(path, {**params, "page": page.number - 1})}">Previous page</a>')
+    parts.append(f'<span class="muted">page {page.number} of {page.pages}</span>')
+    if page.number < page.pages:
+        parts.append(f'<a href="{link(path, {**params, "page": page.number + 1})}">Next page</a>')
+    return f'<nav class="pager" aria-label="Pages">{"".join(parts)}</nav>'
+
+
+def card(title: str, rows: Sequence[tuple[str, str]]) -> str:
+    items = "".join(f"<dt>{esc(k)}</dt><dd>{v}</dd>" for k, v in rows)
+    return f'<section class="card"><h2>{esc(title)}</h2><dl>{items}</dl></section>'
+
+
+def run_link(run_id: object) -> str:
+    if isinstance(run_id, str) and RUN_ID.fullmatch(run_id):
+        return f'<a href="/runs/{run_id}">{run_id}</a>'
+    return esc(run_id)
+
+
+def state_diff(before: object, after: object) -> str:
+    """A ledger row's before → after state (JSON text), one key per line, as a <pre>."""
+
+    def load(raw: object) -> dict:
+        try:
+            data = json.loads(raw) if isinstance(raw, str) and raw else {}
+        except ValueError:
+            return {"?": raw}
+        return data if isinstance(data, dict) else {"?": data}
+
+    b, a = load(before), load(after)
+    lines = []
+    for key in sorted(set(b) | set(a)):
+        if key in a and key in b:
+            lines.append(f"{key}: {b[key]} → {a[key]}")
+        elif key in a:
+            lines.append(f"{key}: → {a[key]}")
+        else:
+            lines.append(f"{key}: {b[key]}")
+    return f"<pre>{esc(chr(10).join(lines))}</pre>" if lines else ""
+
+
+def change_html(delta: int | None) -> str:
+    if delta is None:
+        return ""
+    if delta > 0:
+        return f'<span class="warn">+{delta}</span>'
+    if delta < 0:
+        return f'<span class="ok">{delta}</span>'
+    return '<span class="muted">0</span>'
+
+
+# --- table rows -------------------------------------------------------------------------------------------------
+
+REPORT_HEADERS = ("rule", "status", "reason", "plex item", "shoko file", "fid", "eids", "aid", "group", "when",
+                  "anidb state", "anidb viewed", "detail")  # fmt: skip
+ITEM_COLUMNS = 3  # report columns from "plex item" on: what a list of one reason's items needs
+RUNS_TABLE = Table(
+    "Runs, newest first",
+    ("run", "started", "mode", "scope", "snapshot", "rows by status"),
+    wide=frozenset({5}),
+    stack=True,
+)
+REPORT_TABLE = Table("Report rows", REPORT_HEADERS, wide=frozenset({12}))
+REASON_ITEMS_TABLE = Table("Items with this reason", REPORT_HEADERS[ITEM_COLUMNS:], wide=frozenset({9}))
+REASONS_TABLE = Table(
+    "Reported items by reason",
+    ("rule", "reason", "items", "change", "meaning", "what to do"),
+    wide=frozenset({4, 5}),
+    num=frozenset({2, 3}),
+    stack=True,
+)
+LEDGER_TABLE = Table(
+    "Ledger rows, newest first",
+    (
+        "status",
+        "rule",
+        "plex item",
+        "shoko file",
+        "fid",
+        "date written",
+        "before → after",
+        "detail",
+        "run",
+        "recorded",
+        "id",
+    ),
+    wide=frozenset({6, 7}),
+    num=frozenset({10}),
+)
+
+
+def run_cells(r: RunSummary, now: datetime) -> tuple[str, ...]:
+    return (
+        run_link(r.run_id),
+        f'{esc(fmt_time(r.started))} <span class="muted">({esc(fmt_age(now - r.started))} ago)</span>',
+        esc(r.mode),
+        esc(r.scope),
+        badge(r.snapshot) if r.snapshot else '<span class="muted">?</span>',
+        '<span class="bad">unreadable</span>' if r.unreadable else counts_html(r.statuses),
+    )
+
+
+def report_cells(r: Mapping[str, str]) -> tuple[str, ...]:
+    return (
+        esc(r["rule"]),
+        badge(r["status"]),
+        esc(r["reason"]),
+        esc(r["rating_key"]),
+        esc(r["file_id"]),
+        anidb_link("file", r["fid"]),
+        esc(r["eids"]),
+        anidb_link("anime", r["aid"]),
+        esc(r["release_group"]),
+        esc(fmt_time(r["when"])),
+        esc(r["anidb_state"]),
+        esc(fmt_time(r["anidb_viewdate"])),
+        esc(r["detail"]),
+    )
+
+
+def reason_cells(c: ReasonCount) -> tuple[str, ...]:
+    meaning, todo = REASONS.get(c.reason, ("", ""))
+    return (
+        esc(c.rule),
+        f'<a href="{link("/reported", {"reason": c.reason})}">{esc(c.reason)}</a>',
+        str(c.count),
+        change_html(c.change),
+        esc(meaning),
+        esc(todo),
+    )
+
+
+def ledger_cells(r: Mapping[str, object]) -> tuple[str, ...]:
+    return (
+        badge(r["status"]),
+        esc(r["rule"]),
+        esc(r["rating_key"]),
+        esc(r["file_id"]),
+        anidb_link("file", r["fid"]),
+        esc(fmt_time(r["when_ts"])),
+        state_diff(r["before"], r["after"]),
+        esc(r["detail"]),
+        run_link(r["run_id"]),
+        esc(fmt_time(r["created_at"])),
+        esc(r["id"]),
+    )
+
+
+def row_matches(row: Mapping[str, str], filters: Mapping[str, str]) -> bool:
+    """Exact matches on rule/status/reason/aid; ``item`` matches the Plex rating key, Shoko file id or AniDB fid."""
+    for key in ("rule", "status", "reason", "aid"):
+        if filters[key] and row[key] != filters[key]:
+            return False
+    item = filters["item"]
+    return not item or item in (row["rating_key"], row["file_id"], row["fid"])
 
 
 # --- pages --------------------------------------------------------------------------------------------------------
+
+NAV = (("/", "Status"), ("/runs", "Runs"), ("/reported", "Reported"), ("/ledger", "Ledger"))
 
 
 class ServiceView(Protocol):
@@ -464,7 +745,12 @@ class ServiceView(Protocol):
     def next_poll(self) -> datetime | None: ...
 
 
+Response = tuple[int, str]
+
+
 class Pages:
+    """The UI's pages. Each page method takes the query parameters and returns (HTTP status, HTML)."""
+
     def __init__(
         self,
         service: ServiceView,
@@ -474,100 +760,104 @@ class Pages:
         self.service = service
         self.settings = settings
         self.clock = clock
-        self.reports = Reports(Path(settings.data_dir) / "reports")
-        self.ledger = LedgerView(Path(settings.data_dir) / "ledger.sqlite")
+        self.reports = Reports(settings.reports_dir)
+        self.ledger_view = LedgerView(settings.ledger_path)
 
     @staticmethod
-    def layout(title: str, body: str) -> str:
+    def layout(title: str, body: str, current: str = "") -> str:
         nav = "".join(
-            f'<a href="{href}">{label}</a>'
-            for href, label in (("/", "Status"), ("/runs", "Runs"), ("/reported", "Reported"), ("/ledger", "Ledger"))
+            f'<a href="{href}"' + (' aria-current="page"' if href == current else "") + f">{label}</a>"
+            for href, label in NAV
         )
         return (
             '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>{esc(title)} · pxar</title><link rel="stylesheet" href="/style.css"></head><body>'
-            f"<header><strong>pxar</strong><nav>{nav}</nav>"
+            f'<header><strong>pxar</strong><nav aria-label="Main">{nav}</nav>'
             '<span class="muted">read-only</span></header>'
             f"<main>{body}</main></body></html>\n"
         )
 
+    def not_found(self, what: str = "Page") -> Response:
+        return 404, self.layout("Not found", f"<h1>{esc(what)} not found</h1>")
+
+    def run_csv(self, run_id: str) -> bytes | None:
+        try:
+            return self.reports.csv_path(run_id).read_bytes()
+        except OSError:
+            return None
+
     # Status
 
-    def status(self, params: Mapping[str, str]) -> tuple[int, str]:
+    def status(self, params: Mapping[str, str]) -> Response:
         now = self.clock()
+        cards = [
+            card("Service", self._service_rows(now)),
+            card("MyList snapshot", self._snapshot_rows(now)),
+            card("Ledger", self._ledger_rows()),
+            card("Settings", self._settings_rows()),
+        ]
+        recent = [run_cells(r, now) for r in self.reports.summaries(RECENT_RUNS)]
+        body = (
+            "<h1>Status</h1>"
+            f'<div class="grid">{"".join(cards)}</div>'
+            "<h2>Recent runs</h2>"
+            f"{RUNS_TABLE.render(recent, empty='No runs yet.')}"
+            '<p class="note"><a href="/runs">All runs</a></p>'
+        )
+        return 200, self.layout("Status", body, "/")
+
+    def _service_rows(self, now: datetime) -> list[tuple[str, str]]:
         health = self.service.health()
-        loop = health.get("loop")
-        service_rows = [
-            ("loop", badge(loop)),
-            ("last run", self._run_link(health.get("last_run_id"))),
+        failed = health.get("failed_runs") or 0
+        rows = [
+            ("loop", badge(health.get("loop"))),
+            ("last run", run_link(health.get("last_run_id"))),
             ("last status", badge(health.get("last_status"))),
             ("last finished", esc(fmt_time(health.get("last_finished")))),
             (
-                "failed runs in a row",
+                "failures in a row",
                 (
-                    f"{badge('failed' if health.get('failed_runs') else 'ok')} {esc(health.get('failed_runs', 0))}"
+                    f'<span class="{"bad" if failed else "ok"}">{esc(failed)}</span>'
                     f" of {self.settings.health_max_failed_runs} allowed"
                 ),
             ),
         ]
         if health.get("run_active_since"):
-            service_rows.append(("run active since", esc(fmt_time(health["run_active_since"]))))
+            rows.append(("run active since", esc(fmt_time(health["run_active_since"]))))
         next_poll = self.service.next_poll()
         if next_poll is not None:
-            service_rows.append(("next poll", f"{esc(fmt_time(next_poll))} ({esc(fmt_delta(now - next_poll))})"))
+            rows.append(("next poll", f"{esc(fmt_time(next_poll))} ({esc(fmt_age(now - next_poll))})"))
         if health.get("unhealthy"):
-            service_rows.append(("unhealthy", f'<span class="bad">{esc(health["unhealthy"])}</span>'))
-
-        cards = [
-            self._card("Service", service_rows),
-            self._card("MyList snapshot", self._snapshot_rows(now)),
-            self._card("Ledger", self._ledger_rows()),
-            self._card("Settings", self._settings_rows()),
-        ]
-        recent = self.reports.summaries(RECENT_RUNS)
-        body = (
-            "<h1>Status</h1>"
-            f'<div class="grid">{"".join(cards)}</div>'
-            "<h2>Recent runs</h2>"
-            f"{self._runs_table(recent, now)}"
-            f'<p class="note"><a href="/runs">All runs</a></p>'
-        )
-        return 200, self.layout("Status", body)
-
-    @staticmethod
-    def _card(title: str, rows: list[tuple[str, str]]) -> str:
-        items = "".join(f"<dt>{esc(k)}</dt><dd>{v}</dd>" for k, v in rows)
-        return f'<section class="card"><h2>{esc(title)}</h2><dl>{items}</dl></section>'
-
-    def _run_link(self, run_id: object) -> str:
-        if isinstance(run_id, str) and RUN_ID.fullmatch(run_id):
-            return f'<a href="/runs/{run_id}">{run_id}</a>'
-        return esc(run_id)
+            rows.append(("unhealthy", f'<span class="bad">{esc(health["unhealthy"])}</span>'))
+        return rows
 
     def _snapshot_rows(self, now: datetime) -> list[tuple[str, str]]:
         max_age = timedelta(hours=self.settings.snapshot_max_age_h)
         try:
             age = snapshot_age(Path(self.settings.mylist_path), now)
         except SnapshotError:
-            return [("state", badge("unavailable")), ("detail", "the snapshot file can't be read")]
-        state = "fresh" if snapshot_is_fresh(age, max_age) else "stale"
+            return [("state", badge(SnapshotState.UNAVAILABLE)), ("detail", "the snapshot file can't be read")]
+        if age < timedelta(0):
+            age_text = f"{fmt_age(-age)} in the future (check the clocks)"
+        else:
+            age_text = f"{fmt_age(age)} old"
         return [
-            ("state", badge(state)),
-            ("age", esc(fmt_delta(age)) + ("" if age >= timedelta(0) else " (in the future)")),
+            ("state", badge("fresh" if snapshot_is_fresh(age, max_age) else SnapshotState.STALE)),
+            ("age", esc(age_text)),
             ("max age", f"{self.settings.snapshot_max_age_h} h"),
         ]
 
     def _ledger_rows(self) -> list[tuple[str, str]]:
         try:
-            counts = self.ledger.status_counts()
+            counts = self.ledger_view.status_counts()
         except LedgerUnavailable as exc:
             return [("state", esc(exc))]
         rows = [
             (status, f'<a href="{link("/ledger", {"status": status})}">{counts.get(status, 0)}</a>')
-            for status in ("applied", "failed", "pending")
+            for status in LEDGER_STATUSES
         ]
-        if counts.get("pending"):
+        if counts.get(Status.PENDING):
             rows.append(("attention", '<span class="bad">pending R1 rows: Plex may or may not be marked</span>'))
         return rows
 
@@ -583,353 +873,215 @@ class Pages:
             ("PATH_MAP", path_map),
         ]
 
-    def _runs_table(self, runs: list[RunSummary], now: datetime) -> str:
-        rows = [
-            (
-                self._run_link(r.run_id),
-                f'{esc(fmt_time(r.started))} <span class="muted">({esc(fmt_delta(now - r.started))} ago)</span>',
-                esc(r.mode),
-                esc(r.scope),
-                badge(r.snapshot) if r.snapshot else '<span class="muted">?</span>',
-                '<span class="bad">unreadable</span>' if r.unreadable else counts_html(r.statuses),
-            )
-            for r in runs
-        ]
-        return table(("run", "started", "mode", "scope", "snapshot", "rows by status"), rows, wide=(5,))
-
     # Runs
 
-    def runs(self, params: Mapping[str, str]) -> tuple[int, str]:
+    def runs(self, params: Mapping[str, str]) -> Response:
         mode = params.get("mode", "")
         runs = [r for r in self.reports.summaries() if not mode or r.mode == mode]
-        page = page_number(params)
-        shown = runs[(page - 1) * PAGE_ROWS : page * PAGE_ROWS]
+        page = Page.of(params, len(runs))
+        now = self.clock()
         body = (
             "<h1>Runs</h1>"
-            '<p class="note">The newest 200 runs; older reports are pruned. A scoped run comes from a Tautulli '
-            "trigger and lists only that Plex item.</p>"
-            + filter_form("/runs", [select("mode", ("apply", "plan"), mode)])
-            + self._runs_table(shown, self.clock())
-            + pager("/runs", params, page, len(runs))
+            f'<p class="note">The newest {KEEP_REPORTS} runs; older reports are pruned. A scoped run comes from a '
+            "Tautulli trigger and lists only that Plex item.</p>"
+            + filter_form("/runs", [select("mode", "Mode", ("apply", "plan"), mode)])
+            + RUNS_TABLE.render([run_cells(r, now) for r in page.take(runs)], empty=no_match("/runs"))
+            + pager("/runs", params, page)
         )
-        return 200, self.layout("Runs", body)
+        return 200, self.layout("Runs", body, "/runs")
 
-    def run_detail(self, run_id: str, params: Mapping[str, str]) -> tuple[int, str]:
+    def run_detail(self, run_id: str, params: Mapping[str, str]) -> Response:
         summary = self.reports.summary(run_id)
         rows = self.reports.rows(run_id) if summary else None
         if summary is None or rows is None:
             return 404, self.layout(
                 "Run not found",
-                "<h1>Run not found</h1><p>That report doesn't exist or "
-                "can't be read; reports older than the newest 200 are pruned.</p>",
+                "<h1>Run not found</h1><p>That report doesn't exist or can't be read; only the newest "
+                f"{KEEP_REPORTS} are kept.</p>",
+                "/runs",
             )
         filters = {k: params.get(k, "") for k in ("rule", "status", "reason", "aid", "item")}
-        shown = [r for r in rows if self._row_matches(r, filters)]
-        page = page_number(params)
-        meta = self.reports.meta(run_id)
-        scope_bits = [summary.scope]
-        if meta.get("rules"):
-            scope_bits.append("rules " + ",".join(str(x) for x in meta["rules"]))
-        if meta.get("file_id") is not None:
-            scope_bits.append(f"file {meta['file_id']}")
+        shown = [r for r in rows if row_matches(r, filters)]
+        page = Page.of(params, len(shown))
+        path = f"/runs/{run_id}"
         info = [
             ("started", esc(fmt_time(summary.started))),
             ("mode", esc(summary.mode)),
-            ("scope", esc(" · ".join(scope_bits))),
+            ("scope", esc(summary.scope_label)),
             ("snapshot", badge(summary.snapshot) if summary.snapshot else '<span class="muted">?</span>'),
             ("rows", counts_html(summary.statuses)),
-            ("download", f'<a href="/runs/{run_id}.csv" download>CSV</a>'),
+            ("download", f'<a href="{path}.csv" download>CSV report</a>'),
         ]
         form = filter_form(
-            f"/runs/{run_id}",
+            path,
             [
-                select("rule", sorted({r["rule"] for r in rows}), filters["rule"]),
-                select("status", sorted({r["status"] for r in rows}), filters["status"]),
-                select("reason", sorted({r["reason"] for r in rows}), filters["reason"]),
-                text_input("aid", filters["aid"]),
-                text_input("item", filters["item"]),
+                select("rule", "Rule", sorted({r["rule"] for r in rows}), filters["rule"]),
+                select("status", "Status", sorted({r["status"] for r in rows}), filters["status"]),
+                select("reason", "Reason", sorted({r["reason"] for r in rows}), filters["reason"]),
+                text_input("aid", "Anime (aid)", filters["aid"]),
+                text_input("item", "Any id", filters["item"]),
             ],
         )
         body = (
             f"<h1>Run {esc(run_id)}</h1>"
-            + self._card("Run", info)
+            + card("Run", info)
             + "<h2>Rows</h2>"
-            + '<p class="note"><code>item</code> matches a Plex rating key, Shoko file id or AniDB fid. '
+            + '<p class="note">"Any id" matches a Plex rating key, a Shoko file id or an AniDB fid. '
             f"{len(shown)} of {len(rows)} rows match.</p>"
             + form
-            + self._report_table(shown[(page - 1) * PAGE_ROWS : page * PAGE_ROWS])
-            + pager(f"/runs/{run_id}", params, page, len(shown))
+            + REPORT_TABLE.render([report_cells(r) for r in page.take(shown)], empty=no_match(path))
+            + pager(path, params, page)
         )
-        return 200, self.layout(f"Run {run_id}", body)
-
-    @staticmethod
-    def _row_matches(row: Mapping[str, str], filters: Mapping[str, str]) -> bool:
-        for key in ("rule", "status", "reason", "aid"):
-            if filters[key] and row[key] != filters[key]:
-                return False
-        item = filters["item"]
-        return not item or item in (row["rating_key"], row["file_id"], row["fid"])
-
-    @staticmethod
-    def _report_table(rows: list[dict[str, str]]) -> str:
-        cells = [
-            (
-                esc(r["rule"]),
-                badge(r["status"]),
-                esc(r["reason"]),
-                esc(r["rating_key"]),
-                esc(r["file_id"]),
-                anidb_link("file", r["fid"]),
-                esc(r["eids"]),
-                anidb_link("anime", r["aid"]),
-                esc(r["release_group"]),
-                esc(fmt_time(r["when"])),
-                esc(r["anidb_state"]),
-                esc(fmt_time(r["anidb_viewdate"])),
-                esc(r["detail"]),
-            )
-            for r in rows
-        ]
-        headers = (
-            "rule",
-            "status",
-            "reason",
-            "plex item",
-            "shoko file",
-            "fid",
-            "eids",
-            "aid",
-            "group",
-            "when",
-            "anidb state",
-            "anidb viewed",
-            "detail",
-        )
-        return table(headers, cells, wide=(12,))
+        return 200, self.layout(f"Run {run_id}", body, "/runs")
 
     # Reported items
 
-    def reported(self, params: Mapping[str, str]) -> tuple[int, str]:
+    def reported(self, params: Mapping[str, str]) -> Response:
         full = self.reports.full_runs()
         if not full:
-            return 200, self.layout("Reported", "<h1>Reported items</h1><p>No complete run report yet.</p>")
+            body = "<h1>Reported items</h1><p>No complete run report yet.</p>"
+            return 200, self.layout("Reported", body, "/reported")
         latest, previous = full[0], (full[1] if len(full) > 1 else None)
-        reason = params.get("reason", "")
+        chosen = params.get("reason", "")
         intro = (
             "<h1>Reported items</h1>"
-            f'<p class="note">From the latest full run, {self._run_link(latest.run_id)} '
-            f"({esc(fmt_time(latest.started))}). These are never written; each needs a fix outside pxar or none "
+            f'<p class="note">From the latest full run, {run_link(latest.run_id)} '
+            f"({esc(fmt_time(latest.started))}). pxar never writes these; each needs a fix outside pxar or none "
             "at all. The change column compares with the previous full run"
-            + (f" ({self._run_link(previous.run_id)})" if previous else "")
+            + (f" ({run_link(previous.run_id)})" if previous else "")
             + ".</p>"
         )
-        summary_rows = []
-        # Reasons of the previous run too: one that dropped to zero shows as fixed (0 items, a negative change).
-        keys = set(latest.reasons) | set(previous.reasons if previous else ())
-        counts = {key: latest.reasons.get(key, 0) for key in keys}
-        for (rule, why), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            meaning, todo = REASONS.get(why, ("", ""))
-            change = "" if previous is None else self._change(n - previous.reasons.get((rule, why), 0))
-            summary_rows.append(
-                (
-                    esc(rule),
-                    f'<a href="{link("/reported", {"reason": why})}">{esc(why)}</a>',
-                    str(n),
-                    change,
-                    esc(meaning),
-                    esc(todo),
-                )
-            )
-        body = intro + table(("rule", "reason", "items", "change", "meaning", "what to do"), summary_rows, (4, 5))
-        if reason:
-            rows = self.reports.rows(latest.run_id) or []
-            picked = [r for r in rows if r["status"] == "reported" and r["reason"] == reason]
-            picked.sort(key=lambda r: (r["aid"] == "", r["aid"].zfill(10), r["release_group"], r["rating_key"]))
-            page = page_number(params)
-            body += (
-                f"<h2>{esc(reason)}</h2>"
-                f'<p class="note">{len(picked)} items, sorted by anime and release group.</p>'
-                + self._report_table(picked[(page - 1) * PAGE_ROWS : page * PAGE_ROWS])
-                + pager("/reported", params, page, len(picked))
-            )
-        return 200, self.layout("Reported", body)
+        counts = reason_changes(latest, previous)
+        selected = next((i for i, c in enumerate(counts) if c.reason == chosen), -1)
+        body = intro + REASONS_TABLE.render([reason_cells(c) for c in counts], selected=selected)
+        if chosen:
+            body += self._reason_items(latest.run_id, chosen, params)
+        return 200, self.layout("Reported", body, "/reported")
 
-    @staticmethod
-    def _change(delta: int) -> str:
-        if delta > 0:
-            return f'<span class="warn">+{delta}</span>'
-        if delta < 0:
-            return f'<span class="ok">{delta}</span>'
-        return '<span class="muted">0</span>'
+    def _reason_items(self, run_id: str, reason: str, params: Mapping[str, str]) -> str:
+        rows = self.reports.rows(run_id) or []
+        picked = [r for r in rows if r["status"] == Status.REPORTED and r["reason"] == reason]
+        picked.sort(key=lambda r: (r["aid"] == "", r["aid"].zfill(10), r["release_group"], r["rating_key"]))
+        page = Page.of(params, len(picked))
+        in_run = link(f"/runs/{run_id}", {"status": Status.REPORTED, "reason": reason})
+        items = [report_cells(r)[ITEM_COLUMNS:] for r in page.take(picked)]
+        return (
+            f"<h2>{esc(reason)}</h2>"
+            f'<p class="note">{len(picked)} items, sorted by anime and release group. '
+            f'<a href="{in_run}">Filter these in the run view</a></p>'
+            + REASON_ITEMS_TABLE.render(items)
+            + pager("/reported", params, page)
+        )
 
     # Ledger
 
-    def ledger_page(self, params: Mapping[str, str]) -> tuple[int, str]:
-        filters: dict[str, object] = {k: params[k] for k in LEDGER_FILTERS if params.get(k)}
-        if "file_id" in filters:
-            raw = str(filters["file_id"])
-            filters["file_id"] = int(raw) if raw.isascii() and raw.isdigit() and len(raw) < 19 else -1
-        page = page_number(params)
+    def ledger(self, params: Mapping[str, str]) -> Response:
+        filters = {k: params[k] for k in LEDGER_FILTERS if params.get(k)}
         form = filter_form(
             "/ledger",
             [
-                select("status", ("applied", "failed", "pending"), params.get("status", "")),
-                select("rule", ("R1", "R2", "R2b"), params.get("rule", "")),
-                text_input("run_id", params.get("run_id", "")),
-                text_input("rating_key", params.get("rating_key", "")),
-                text_input("file_id", params.get("file_id", "")),
+                select("status", "Status", LEDGER_STATUSES, params.get("status", "")),
+                select("rule", "Rule", EXECUTABLE_RULES, params.get("rule", "")),
+                text_input("run_id", "Run", params.get("run_id", "")),
+                text_input("rating_key", "Plex item", params.get("rating_key", "")),
+                text_input("file_id", "Shoko file", params.get("file_id", "")),
             ],
         )
         note = (
             '<p class="note">Every write pxar attempted, newest first. A <span class="bad">pending</span> R1 row '
-            "means the service stopped after recording the R1 and before recording how the scrobble went, so Plex may or "
-            "may not have it. "
-            "Failed writes are retried on the next run.</p>"
+            "means the service stopped after recording the R1 and before recording how the scrobble went, so Plex may "
+            "or may not have it. Failed writes are retried on the next run.</p>"
         )
         try:
-            rows, total = self.ledger.query(filters, (page - 1) * PAGE_ROWS)
+            total = self.ledger_view.count(filters)
+            page = Page.of(params, total)
+            rows = self.ledger_view.rows(filters, page.offset)
         except LedgerUnavailable as exc:
-            return 200, self.layout("Ledger", f"<h1>Ledger</h1>{note}<p>{esc(exc)}</p>")
-        cells = [
-            (
-                esc(r["id"]),
-                esc(fmt_time(r["created_at"])),
-                self._run_link(r["run_id"]),
-                esc(r["rule"]),
-                badge(r["status"]),
-                esc(r["rating_key"]),
-                esc(r["file_id"]),
-                anidb_link("file", "" if r["fid"] is None else str(r["fid"])),
-                esc(fmt_time(r["when_ts"])),
-                self._state_diff(r["before"], r["after"]),
-                esc(r["detail"]),
-            )
-            for r in rows
-        ]
-        headers = (
-            "id",
-            "recorded",
-            "run",
-            "rule",
-            "status",
-            "plex item",
-            "shoko file",
-            "fid",
-            "date written",
-            "before → after",
-            "detail",
-        )
+            return 200, self.layout("Ledger", f"<h1>Ledger</h1>{note}<p>{esc(exc)}</p>", "/ledger")
         body = (
             f"<h1>Ledger</h1>{note}{form}"
             f'<p class="note">{total} rows match.</p>'
-            + table(headers, cells, wide=(9, 10))
-            + pager("/ledger", params, page, total)
+            + LEDGER_TABLE.render([ledger_cells(r) for r in rows], empty=no_match("/ledger"))
+            + pager("/ledger", params, page)
         )
-        return 200, self.layout("Ledger", body)
-
-    @staticmethod
-    def _state_diff(before: str | None, after: str | None) -> str:
-        def load(raw: str | None) -> dict:
-            try:
-                data = json.loads(raw) if raw else {}
-            except ValueError:
-                return {"?": raw}
-            return data if isinstance(data, dict) else {"?": data}
-
-        b, a = load(before), load(after)
-        lines = []
-        for key in sorted(set(b) | set(a)):
-            if key in a and key in b:
-                lines.append(f"{key}: {b[key]} → {a[key]}")
-            elif key in a:
-                lines.append(f"{key}: → {a[key]}")
-            else:
-                lines.append(f"{key}: {b[key]}")
-        return f"<pre>{esc(chr(10).join(lines))}</pre>" if lines else ""
+        return 200, self.layout("Ledger", body, "/ledger")
 
 
 # --- HTTP -------------------------------------------------------------------------------------------------------
 
 _RUN_PATH = re.compile(r"/runs/(" + RUN_ID.pattern + r")")
 _RUN_CSV_PATH = re.compile(r"/runs/(" + RUN_ID.pattern + r")\.csv")
+# Page methods by path, looked up on each request.
+ROUTES = {"/": "status", "/runs": "runs", "/reported": "reported", "/ledger": "ledger"}
 
 
-def make_ui_server(pages: Pages, token: str, host: str, port: int) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
-        timeout = 10
-        server_version = "pxar"
-        sys_version = ""
+@dataclass(frozen=True)
+class Reply:
+    code: int
+    body: bytes
+    content_type: str = "text/html; charset=utf-8"
+    headers: Mapping[str, str] = field(default_factory=dict)
 
-        def _send(self, code: int, body: bytes, content_type: str, extra: Mapping[str, str] | None = None) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            for name, value in {**_SECURITY_HEADERS, **(extra or {})}.items():
-                self.send_header(name, value)
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
 
-        def _page(self, code: int, page: str) -> None:
-            self._send(code, page.encode(), "text/html; charset=utf-8")
+UNAUTHORIZED = Reply(
+    401,
+    b"authentication required\n",
+    "text/plain; charset=utf-8",
+    {"WWW-Authenticate": 'Basic realm="pxar", charset="UTF-8"'},
+)
+SERVER_ERROR = Reply(
+    500, b"<!doctype html><title>Error</title><h1>Something went wrong</h1><p>See the service log.</p>\n"
+)
 
-        def _route(self) -> None:
+
+def respond(pages: Pages, path: str, params: Mapping[str, str]) -> Reply:
+    """The reply to an authorized GET of ``path`` (already stripped of its query and trailing slash)."""
+    if path == "/style.css":
+        return Reply(200, _STYLE.encode(), "text/css; charset=utf-8")
+    if path in ROUTES:
+        code, page = getattr(pages, ROUTES[path])(params)
+    elif m := _RUN_CSV_PATH.fullmatch(path):
+        data = pages.run_csv(m.group(1))
+        if data is not None:
+            disposition = f"attachment; filename={quote(f'pxar-{m.group(1)}.csv')}"
+            return Reply(200, data, "text/csv; charset=utf-8", {"Content-Disposition": disposition})
+        code, page = pages.not_found("Report")
+    elif m := _RUN_PATH.fullmatch(path):
+        code, page = pages.run_detail(m.group(1), params)
+    else:
+        code, page = pages.not_found()
+    return Reply(code, page.encode())
+
+
+def make_ui_server(pages: Pages, token: str, host: str, port: int) -> BoundedServer:
+    class Handler(QuietHandler):
+        def _reply(self) -> Reply:
             if not authorized(self.headers.get("Authorization"), token):
-                self._send(
-                    401,
-                    b"authentication required\n",
-                    "text/plain; charset=utf-8",
-                    {"WWW-Authenticate": 'Basic realm="pxar", charset="UTF-8"'},
-                )
-                return
+                return UNAUTHORIZED
             url = urlsplit(self.path)
-            params = query_params(url.query)
-            path = url.path.rstrip("/") or "/"
             try:
-                if path == "/style.css":
-                    self._send(200, _STYLE.encode(), "text/css; charset=utf-8")
-                elif path == "/":
-                    self._page(*pages.status(params))
-                elif path == "/runs":
-                    self._page(*pages.runs(params))
-                elif path == "/reported":
-                    self._page(*pages.reported(params))
-                elif path == "/ledger":
-                    self._page(*pages.ledger_page(params))
-                elif m := _RUN_CSV_PATH.fullmatch(path):
-                    self._csv(m.group(1))
-                elif m := _RUN_PATH.fullmatch(path):
-                    self._page(*pages.run_detail(m.group(1), params))
-                else:
-                    self._page(404, pages.layout("Not found", "<h1>Not found</h1>"))
+                return respond(pages, url.path.rstrip("/") or "/", query_params(url.query))
             except Exception as exc:  # noqa: BLE001 - a broken page must not kill the handler or leak details
                 log.error("web UI request failed: %s", type(exc).__name__)
-                self._page(500, pages.layout("Error", "<h1>Something went wrong</h1><p>See the service log.</p>"))
+                return SERVER_ERROR
 
-        def _csv(self, run_id: str) -> None:
+        def _send(self, reply: Reply) -> None:
             try:
-                data = pages.reports.csv_path(run_id).read_bytes()
-            except OSError:
-                self._page(404, pages.layout("Not found", "<h1>Not found</h1>"))
-                return
-            name = quote(f"pxar-{run_id}.csv")
-            self._send(200, data, "text/csv; charset=utf-8", {"Content-Disposition": f"attachment; filename={name}"})
+                self.send_response(reply.code)
+                self.send_header("Content-Type", reply.content_type)
+                self.send_header("Content-Length", str(len(reply.body)))
+                for name, value in {**_SECURITY_HEADERS, **reply.headers}.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(reply.body)
+            except OSError:  # the client went away mid-reply: there is no one left to tell
+                self.close_connection = True
 
         def do_GET(self) -> None:
-            self._route()
+            self._send(self._reply())
 
         def do_HEAD(self) -> None:
-            self._route()
+            self._send(self._reply())
 
-        def log_message(self, format: str, *args) -> None:
-            # Intentionally empty: no per-request access log (it would include query strings).
-            pass
-
-    server_cls = ThreadingHTTPServer
-    if ":" in host:
-
-        class V6Server(ThreadingHTTPServer):
-            address_family = socket.AF_INET6
-
-        server_cls = V6Server
-    return server_cls((host, port), Handler)
+    return bind(host, port, Handler)
