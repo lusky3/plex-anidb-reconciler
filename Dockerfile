@@ -13,7 +13,7 @@ ENV UV_PYTHON_INSTALL_DIR=/python \
     UV_LINK_MODE=copy
 WORKDIR /app
 # Interpreter version comes from .python-version (3.14).
-COPY .python-version pyproject.toml uv.lock README.md ./
+COPY .python-version pyproject.toml uv.lock README.md LICENSE ./
 RUN uv python install \
     && uv sync --locked --no-dev --no-install-project
 COPY src ./src
@@ -40,6 +40,7 @@ LABEL org.opencontainers.image.title="plex-anidb-reconciler" \
       org.opencontainers.image.url="https://github.com/lusky3/plex-anidb-reconciler" \
       org.opencontainers.image.documentation="https://github.com/lusky3/plex-anidb-reconciler/blob/main/docs/deployment.md" \
       org.opencontainers.image.vendor="lusky3" \
+      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.base.name="gcr.io/distroless/cc-debian13:nonroot"
 # The venv's interpreter symlinks into /python, so it must keep the same path.
 COPY --from=build /python /python

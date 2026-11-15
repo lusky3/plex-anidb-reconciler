@@ -141,6 +141,7 @@ jobs:
             org.opencontainers.image.description=Reconciles Plex watched state with AniDB MyList per-file watched dates via Shoko
             org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/deployment.md
             org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.licenses=MIT
             org.opencontainers.image.base.name=gcr.io/distroless/cc-debian13:nonroot
           annotations: |
             org.opencontainers.image.title=plex-anidb-reconciler
