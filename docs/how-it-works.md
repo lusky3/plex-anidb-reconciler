@@ -132,8 +132,10 @@ Detail values on write rows:
 
 ## Reports and ledger
 
-Everything lives under `DATA_DIR`. Each run writes `reports/<run_id>.csv` and a self-contained
-`reports/<run_id>.html` with summary counts first and the rows after, and the tool keeps the newest 200 of each. The
+Everything lives under `DATA_DIR`. Each run writes `reports/<run_id>.csv`, a self-contained
+`reports/<run_id>.html` with summary counts first and the rows after, and `reports/<run_id>.json`, which records
+whether the run was a plan or an apply, whether it was scoped to some Plex items, and the snapshot state. The tool
+keeps the newest 200 of each. The
 columns are `rule, kind, status, rating_key, file_id, fid, eids, when, reason, detail, aid, release_group,
 anidb_state, anidb_viewdate`.
 

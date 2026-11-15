@@ -16,6 +16,8 @@ PLAN_TIMEOUT = httpx.Timeout(connect=10, read=60, write=30, pool=10)
 # each limit per phase and the read limit per chunk, so this is a typical bound, not a hard deadline.
 WRITE_PATH_TIMEOUT = httpx.Timeout(connect=5, read=10, write=5, pool=5)
 
+UI_TOKEN_MIN_LEN = 32  # e.g. `openssl rand -hex 32` gives 64
+
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN", "PLEX_SECTIONS")
 
 
@@ -89,6 +91,24 @@ def parse_listen(raw: str) -> tuple[str, int]:
     return host, int(port_s)
 
 
+def _ui_settings(env: Mapping[str, str], listen: str) -> tuple[str, str]:
+    """UI_LISTEN (empty: no web UI) and UI_TOKEN. The UI needs its own port, so exposing it never exposes the
+    unauthenticated /trigger, and a token of at least UI_TOKEN_MIN_LEN characters."""
+    ui_listen = (env.get("UI_LISTEN") or "").strip()
+    if not ui_listen:
+        return "", ""
+    try:
+        _, ui_port = parse_listen(ui_listen)
+    except ValueError:
+        raise ValueError("UI_LISTEN must be host:port or [ipv6]:port with port 1-65535") from None
+    if ui_port == parse_listen(listen)[1]:
+        raise ValueError("UI_LISTEN must use a different port than LISTEN")
+    token = (env.get("UI_TOKEN") or "").strip()
+    if len(token) < UI_TOKEN_MIN_LEN:
+        raise ValueError(f"UI_TOKEN must be set to at least {UI_TOKEN_MIN_LEN} characters when UI_LISTEN is set")
+    return ui_listen, token
+
+
 @dataclass(frozen=True)
 class Settings:
     shoko_url: str
@@ -109,6 +129,8 @@ class Settings:
     shutdown_grace_s: int = 25
     run_stale_minutes: int = 360  # an active run longer than this makes /healthz stale
     health_max_failed_runs: int = 3  # this many failed runs in a row make /healthz return 503
+    ui_listen: str = ""  # read-only web UI address; empty = no UI
+    ui_token: str = field(default="", repr=False)  # required with ui_listen
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -134,6 +156,7 @@ class Settings:
 
         listen = opt("LISTEN", "0.0.0.0:8787")
         parse_listen(listen)
+        ui_listen, ui_token = _ui_settings(env, listen)
 
         return cls(
             shoko_url=required["SHOKO_URL"],
@@ -154,4 +177,6 @@ class Settings:
             shutdown_grace_s=_int(env, "SHUTDOWN_GRACE_S", 25, 0),
             run_stale_minutes=_int(env, "RUN_STALE_MINUTES", 360, 1),
             health_max_failed_runs=_int(env, "HEALTH_MAX_FAILED_RUNS", 3, 1),
+            ui_listen=ui_listen,
+            ui_token=ui_token,
         )

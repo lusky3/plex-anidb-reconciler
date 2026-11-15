@@ -1,7 +1,8 @@
-"""Per-run CSV and HTML reports and the stdout summary."""
+"""Per-run CSV and HTML reports, the run meta file and the stdout summary."""
 
 import csv
 import html
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable
@@ -116,10 +117,17 @@ def write_html_report(outcomes: list[Outcome], path: Path, file_state: FileState
     path.write_text(page, encoding="utf-8")
 
 
+def write_run_meta(path: Path, meta: dict[str, object]) -> None:
+    """``<run_id>.json`` next to the CSV: how the run was started (plan or apply, full or scoped) and its
+    snapshot state, which the CSV rows alone can't tell. The web UI reads it; nothing else depends on it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(meta, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def prune_reports(directory: Path, keep: int = 200) -> None:
-    """Keep the newest ``keep`` run reports of each format (CSV, HTML). Run ids start with a UTC timestamp,
-    so names sort by age."""
-    for pattern in ("*.csv", "*.html"):
+    """Keep the newest ``keep`` run reports of each format (CSV, HTML, meta JSON). Run ids start with a UTC
+    timestamp, so names sort by age."""
+    for pattern in ("*.csv", "*.html", "*.json"):
         _prune(directory, pattern, keep)
 
 

@@ -858,9 +858,71 @@ def test_serve_warns_about_short_grace_then_runs_until_shutdown(caplog, monkeypa
     monkeypatch.setattr(serve_mod, "make_server", lambda service, host, port: FakeServer())
     monkeypatch.setattr(serve_mod.signal, "signal", lambda *a: None)
     monkeypatch.setattr(serve_mod, "finish_shutdown", lambda loop, grace: events.append("finish_shutdown"))
-    settings = SimpleNamespace(shutdown_grace_s=5, listen="127.0.0.1:8787")
+    settings = SimpleNamespace(shutdown_grace_s=5, listen="127.0.0.1:8787", ui_listen="")
     with caplog.at_level("WARNING"):
         serve_mod.serve(settings)
     assert "SHUTDOWN_GRACE_S=5" in caplog.text
     assert events[0] == "request_run" and events[-2:] == ["finish_shutdown", "server_close"]
     assert "serve_forever" in events
+
+
+def test_serve_starts_the_web_ui_and_stops_it_on_sigterm(monkeypatch):
+    from plex_anidb_reconciler import serve as serve_mod
+
+    handlers = {}
+    ui_down = threading.Event()
+    api_down = threading.Event()
+    events = []
+
+    class FakeUI:
+        def shutdown(self):
+            ui_down.set()
+
+        def server_close(self):
+            events.append("ui_close")
+
+    class FakeServer:
+        def serve_forever(self):
+            handlers[serve_mod.signal.SIGTERM](serve_mod.signal.SIGTERM, None)
+            assert ui_down.wait(WAIT) and api_down.wait(WAIT)
+
+        def shutdown(self):
+            api_down.set()
+
+        def server_close(self):
+            events.append("api_close")
+
+    class FakeService:
+        def __init__(self, settings):
+            pass
+
+        def request_run(self):
+            pass
+
+        def loop(self, stop):
+            stop.wait(WAIT)
+
+    monkeypatch.setattr(serve_mod, "Service", FakeService)
+    monkeypatch.setattr(serve_mod, "make_server", lambda service, host, port: FakeServer())
+    monkeypatch.setattr(serve_mod, "start_ui", lambda service, settings: FakeUI())
+    monkeypatch.setattr(serve_mod.signal, "signal", lambda sig, handler: handlers.__setitem__(sig, handler))
+    serve_mod.serve(SimpleNamespace(shutdown_grace_s=25, listen="127.0.0.1:8787", ui_listen="127.0.0.1:8788"))
+    assert events == ["api_close", "ui_close"]
+
+
+def test_start_ui_is_off_without_ui_listen():
+    from plex_anidb_reconciler.serve import start_ui
+
+    assert start_ui(object(), SimpleNamespace(ui_listen="")) is None
+
+
+def test_next_poll_follows_the_last_heartbeat():
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    svc = make_service(lambda settings, **kw: FakeResult("r", {}), clock=lambda: now)
+    assert svc.next_poll() is None  # the loop hasn't started
+    svc._loop_thread = threading.current_thread()
+    assert svc.next_poll() is None  # no heartbeat yet
+    svc._beat()
+    assert svc.next_poll() == now + timedelta(minutes=15)
+    svc._run_started = now
+    assert svc.next_poll() is None  # a run is active

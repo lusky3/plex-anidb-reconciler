@@ -22,6 +22,7 @@ from plex_anidb_reconciler.models import SnapshotState, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
 from plex_anidb_reconciler.shoko import ShokoError
+from plex_anidb_reconciler.webui import Pages, make_ui_server
 
 log = logging.getLogger(__name__)
 MAX_BODY = 1024 * 1024  # larger bodies get 413 and the connection is closed
@@ -108,6 +109,14 @@ class Service:
         if failed >= self.settings.health_max_failed_runs:
             out["unhealthy"] = f"{failed} consecutive failed runs (last: {out['last_status']})"
         return out
+
+    def next_poll(self) -> datetime | None:
+        """When the loop's next timed run starts unless a trigger comes first. None while a run is active
+        or before the loop has started."""
+        with self._state_lock:
+            if self._run_started is not None or self._heartbeat is None or self._loop_thread is None:
+                return None
+            return self._heartbeat + timedelta(minutes=max(self.settings.poll_minutes, 1))
 
     def run_pending_now(self, rating_keys: frozenset[str] | None = None) -> None:
         """Run one reconcile (blocking if one is in flight), limited to ``rating_keys`` if given. Never raises."""
@@ -307,17 +316,31 @@ def warn_if_grace_too_short(settings: Settings) -> None:
         )
 
 
+def start_ui(service: Service, settings: Settings) -> ThreadingHTTPServer | None:
+    """Start the read-only web UI on UI_LISTEN in a daemon thread, or return None when it is off."""
+    if not settings.ui_listen:
+        return None
+    host, port = parse_listen(settings.ui_listen)
+    ui = make_ui_server(Pages(service, settings), settings.ui_token, host, port)
+    threading.Thread(target=ui.serve_forever, name="web-ui", daemon=True).start()
+    log.info("web UI on %s", settings.ui_listen)
+    return ui
+
+
 def serve(settings: Settings) -> None:
     warn_if_grace_too_short(settings)
     host, port = parse_listen(settings.listen)
     service = Service(settings)
     server = make_server(service, host, port)
+    ui = start_ui(service, settings)
     stop = threading.Event()
 
     def shutdown(signum, frame) -> None:
         stop.set()  # an in-flight run also sees this and stops before its next write
         service.request_run()  # wake the loop; it exits after an in-flight run completes
         threading.Thread(target=server.shutdown, daemon=True).start()
+        if ui is not None:
+            threading.Thread(target=ui.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
@@ -328,3 +351,5 @@ def serve(settings: Settings) -> None:
     server.serve_forever()
     finish_shutdown(loop, settings.shutdown_grace_s)
     server.server_close()
+    if ui is not None:
+        ui.server_close()

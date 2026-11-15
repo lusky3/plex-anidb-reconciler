@@ -12,7 +12,7 @@ import respx
 
 from plex_anidb_reconciler import cli
 from plex_anidb_reconciler.config import Settings
-from plex_anidb_reconciler.models import Action, ActionKind
+from plex_anidb_reconciler.models import Action, ActionKind, Rule
 from plex_anidb_reconciler.runner import build_clients, run_once
 
 
@@ -918,7 +918,7 @@ def test_html_reports_pruned_with_csvs(env, monkeypatch):
     monkeypatch.setattr(runner, "KEEP_REPORTS", 2)
     paths = [go(env, apply=False, now=datetime(2026, 1, d, tzinfo=UTC)).report_path for d in (1, 2, 3)]
     kept = sorted(p.name for p in paths[0].parent.iterdir())
-    assert kept == sorted(f"{p.stem}.{ext}" for p in paths[1:] for ext in ("csv", "html"))
+    assert kept == sorted(f"{p.stem}.{ext}" for p in paths[1:] for ext in ("csv", "html", "json"))
 
 
 @respx.mock
@@ -927,6 +927,32 @@ def test_snapshot_unavailable_still_writes_html(env):
     os.remove(env["MYLIST_PATH"])
     res = go(env, apply=True)
     assert "no actions" in res.report_path.with_suffix(".html").read_text(encoding="utf-8")
+    meta = json.loads(res.report_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert meta == {
+        "run_id": res.run_id,
+        "mode": "apply",
+        "full": True,
+        "rules": None,
+        "file_id": None,
+        "snapshot": "unavailable",
+    }
+
+
+@respx.mock
+def test_run_meta_records_mode_and_scope(env):
+    mock_servers()
+    plan = go(env, apply=False)
+    assert json.loads(plan.report_path.with_suffix(".json").read_text(encoding="utf-8")) == {
+        "run_id": plan.run_id,
+        "mode": "plan",
+        "full": True,
+        "rules": None,
+        "file_id": None,
+        "snapshot": "ok",
+    }
+    scoped = go(env, apply=True, rules=frozenset({Rule.R2, Rule.R1}), file_id=7, rating_keys=frozenset({"1"}))
+    meta = json.loads(scoped.report_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert (meta["mode"], meta["full"], meta["rules"], meta["file_id"]) == ("apply", False, ["R1", "R2"], 7)
 
 
 # --- triggered runs (/trigger with rating keys): plan everything, act only on those items ---
