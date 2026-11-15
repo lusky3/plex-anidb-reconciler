@@ -421,12 +421,13 @@ def _snapshot_unavailable(run_id: str, report_path: Path, reason: str) -> RunRes
 
 def _summarise(run: RunInfo, outcomes: list[Outcome], shoko_changed: int, fresh: bool) -> RunResult:
     print(summarize(outcomes))
-    counts: dict[str, int] = dict(Counter(o.status for o in outcomes))
+    counts: dict[str, int] = dict(Counter(o.status.value for o in outcomes))
     if shoko_changed:
         counts["shoko_changed"] = shoko_changed
     snapshot = SnapshotState.OK if fresh else SnapshotState.STALE
     mode = "apply" if run.apply else "plan"
-    log.info("run %s (%s, snapshot %s): %s", run.run_id, mode, snapshot, counts or "no actions")
+    tally = " ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no actions"
+    log.info("run %s (%s, snapshot %s): %s", run.run_id, mode, snapshot, tally)
     return RunResult(run.run_id, counts, run.report_path, snapshot)
 
 

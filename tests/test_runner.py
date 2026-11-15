@@ -1118,3 +1118,26 @@ def test_stop_during_pre_write_reads_skips_the_put(env):
     assert put.call_count == 0 and stats.call_count == 0
     assert set_rows(res) == [("R2", "3", "skipped", "shutdown")]
     assert _query(Path(env["DATA_DIR"]) / "ledger.sqlite", "SELECT COUNT(*) FROM actions") == [(0,)]
+
+
+# --- logs: one readable summary line per run, no per-request httpx lines ---
+
+
+@respx.mock
+def test_run_summary_log_is_readable(env, caplog):
+    mock_servers()
+    with caplog.at_level("INFO"):
+        res = go(env, apply=True)
+    line = next(r.getMessage() for r in caplog.records if r.name == "plex_anidb_reconciler.runner")
+    assert line == f"run {res.run_id} (apply, snapshot ok): applied=3"
+
+
+def test_cli_silences_httpx_request_logs(env, monkeypatch):
+    import logging
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.NOTSET)
+    cli.main(["plan"])
+    assert logging.getLogger("httpx").level >= logging.WARNING

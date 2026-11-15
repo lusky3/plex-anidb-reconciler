@@ -63,6 +63,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # no line per HTTP request; runs log their own summary
     if args.command == "healthcheck":  # needs no backend settings
         return healthcheck(os.environ)
     try:
