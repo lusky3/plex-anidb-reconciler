@@ -1016,3 +1016,50 @@ def test_triggered_dependent_r2b_skipped_until_its_prerequisite_is_applied(env):
     res = go(env, apply=True, rating_keys=frozenset({"a", "b"}))
     assert put_paths(put) == ["/api/v3/File/2/UserStats", "/api/v3/File/1/UserStats"]
     assert set_rows(res) == [("R2", "2", "applied", ""), ("R2b", "1", "applied", "")]
+
+
+# --- snapshot unavailable: reported with its reason, CLI exit 3 ---
+
+
+@pytest.mark.parametrize(
+    "breakage,problem",
+    [
+        ("missing", "cannot read snapshot"),
+        ("not_json", "invalid JSON"),
+        ("bad_entry", "malformed entr"),
+        ("directory", "cannot read snapshot"),
+    ],
+)
+@respx.mock
+def test_snapshot_unavailable_names_path_and_problem_not_content(env, capsys, caplog, breakage, problem):
+    scrobble, put = mock_servers()
+    path = Path(env["MYLIST_PATH"])
+    if breakage == "missing":
+        path.unlink()
+    elif breakage == "not_json":
+        path.write_text("CONTENTCANARY {", encoding="utf-8")
+    elif breakage == "bad_entry":
+        path.write_text(json.dumps([snap(1, 50, "CONTENTCANARY")]), encoding="utf-8")
+    else:
+        path.unlink()
+        path.mkdir()
+    with caplog.at_level("WARNING"):
+        res = go(env, apply=True)
+    assert res.snapshot == "unavailable"
+    assert str(path) in res.detail and problem in res.detail
+    out = capsys.readouterr().out
+    for text in (out, caplog.text):
+        assert str(path) in text and problem in text
+        assert "CONTENTCANARY" not in text
+    assert scrobble.call_count == 0 and put.call_count == 0
+
+
+@pytest.mark.parametrize("command", ["plan", "apply"])
+def test_cli_snapshot_unavailable_exits_3_with_reason(env, monkeypatch, capsys, command):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    os.remove(env["MYLIST_PATH"])
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: run_once(s, clients=clients(s), **kw))
+    assert cli.main([command]) == 3
+    err = capsys.readouterr().err
+    assert "snapshot unavailable" in err and env["MYLIST_PATH"] in err and "cannot read snapshot" in err

@@ -17,6 +17,8 @@ class _Result:
     def __init__(self) -> None:
         self.counts: dict = {}
         self.report_path = Path("/tmp/report.csv")
+        self.snapshot = "ok"
+        self.detail = ""
 
 
 @pytest.fixture

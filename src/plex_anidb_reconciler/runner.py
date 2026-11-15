@@ -57,6 +57,7 @@ class RunResult:
     counts: dict[str, int]
     report_path: Path
     snapshot: SnapshotState = SnapshotState.OK
+    detail: str = ""  # why the snapshot is unavailable: its path and the kind of problem, never its content
 
 
 @dataclass(frozen=True)
@@ -193,14 +194,17 @@ def _fetch_plex(settings: Settings, plex: PlexClient) -> tuple[list[PlexItem], d
     return items, history
 
 
-def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | None:
-    """The MyList snapshot and whether it is fresh enough for R2/R2b, or None if it cannot be read."""
+def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | str:
+    """The MyList snapshot and whether it is fresh enough for R2/R2b, or why it cannot be used (the path and
+    the kind of problem; SnapshotError messages never quote the file's content)."""
     path = Path(settings.mylist_path)
     try:
         entries = load_mylist(path)
         age = snapshot_age(path, now)
-    except SnapshotError, OSError:
-        return None
+    except SnapshotError as exc:
+        return str(exc)
+    except OSError as exc:
+        return f"{path}: cannot read snapshot ({exc.strerror or type(exc).__name__})"
     return Snapshot(MyListIndex(entries), snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h)))
 
 
@@ -396,11 +400,11 @@ def _finish(outcomes: list[Outcome], report_path: Path, file_state: FileStateLoo
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 
-def _snapshot_unavailable(run_id: str, report_path: Path) -> RunResult:
+def _snapshot_unavailable(run_id: str, report_path: Path, reason: str) -> RunResult:
     _finish([], report_path)
-    print("snapshot_unavailable: no actions planned")
-    log.warning("run %s: MyList snapshot unavailable, no actions planned", run_id)
-    return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE)
+    print(f"snapshot_unavailable: {reason}; no actions planned")
+    log.warning("run %s: MyList snapshot unavailable (%s), no actions planned", run_id, reason)
+    return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE, reason)
 
 
 def _summarise(run: RunInfo, outcomes: list[Outcome], shoko_changed: int, fresh: bool) -> RunResult:
@@ -435,8 +439,8 @@ def run_once(
     run_id = _new_run_id(now)
     run = RunInfo(run_id, Path(settings.data_dir) / "reports" / f"{run_id}.csv", apply)
     snapshot = _load_snapshot(settings, now)
-    if snapshot is None:
-        return _snapshot_unavailable(run_id, run.report_path)
+    if isinstance(snapshot, str):
+        return _snapshot_unavailable(run_id, run.report_path, snapshot)
 
     with (
         _open_clients(settings, clients) as active,
