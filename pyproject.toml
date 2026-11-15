@@ -3,6 +3,8 @@ name = "plex-anidb-reconciler"
 version = "0.1.0"
 description = "Reconcile Plex watched flags with AniDB MyList via Shoko"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = ["httpx"]
 

@@ -177,8 +177,14 @@ def _plan_r2(
         return _report(Rule.R4, "plex_marked_by_reconciler", rating_key, shoko_file)
     else:
         when = item.last_viewed_at
-    if when is None:
-        return _report(Rule.R4, "no_date", rating_key, shoko_file)
+        if when is None:
+            return _report(Rule.R4, "no_date", rating_key, shoko_file)
+        # lastViewedAt has no file identity and may be a scrobble (this tool's R1 from a lost ledger, or a manual
+        # mark) from before Shoko knew this file: only a date on or after the file's import can be its watch.
+        if shoko_file.created_at is None:
+            return _report(Rule.R4, "unknown_file_age", rating_key, shoko_file, when)
+        if when < shoko_file.created_at:
+            return _report(Rule.R4, "predates_file", rating_key, shoko_file, when)
     if not ctx.snapshot_fresh:
         return _report(Rule.R4, "stale_snapshot", rating_key, shoko_file, when)
     return _set(

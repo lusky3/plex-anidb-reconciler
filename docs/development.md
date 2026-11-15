@@ -35,9 +35,11 @@ run as uid 10001, and exit 1 on a config error without echoing env values. Trivy
 HIGH/CRITICAL vulnerability. On pull requests the job uploads the SBOM (SPDX) and provenance as the `sbom-<sha>`
 artifact; it pushes nothing, and its token is read-only.
 
-**publish** runs on pushes and the schedule, never on pull requests. It builds without cache and pushes to GHCR with
-SBOM and provenance attestations and OCI labels. Then it smoke-tests and Trivy-scans the pushed digest and checks
-that both attestations exist. No other job has `packages: write`.
+**publish** runs on pushes and the schedule, never on pull requests. It builds without cache and pushes to GHCR by
+digest only, with SBOM and provenance attestations and OCI labels, so no tag points at the image yet. It smoke-tests
+and Trivy-scans that digest and checks that both attestations exist; only after all of that passes does it point the
+tags at the same digest with `docker buildx imagetools create` and confirm each tag resolves to it. No other job has
+`packages: write`.
 
 Builds from `main` get `latest` and `sha-<commit>` (and get rebuilt weekly); a `vX.Y.Z` tag produces `X.Y.Z`, `X.Y`
 and `sha-<commit>`. `latest` never moves on a release tag. To inspect the SBOM, run

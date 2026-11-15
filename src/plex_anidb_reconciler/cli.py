@@ -7,11 +7,16 @@ import sys
 from datetime import UTC, datetime
 
 from plex_anidb_reconciler.config import Settings
-from plex_anidb_reconciler.models import Rule, Status
+from plex_anidb_reconciler.models import Rule, SnapshotState, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import EXECUTABLE_RULES, run_once
 from plex_anidb_reconciler.serve import healthcheck, serve
 from plex_anidb_reconciler.shoko import ShokoError
+
+EXIT_OK = 0
+EXIT_CONFIG = 1
+EXIT_RUN_FAILED = 2  # a write failed, the run failed, or bad command line (argparse)
+EXIT_SNAPSHOT_UNAVAILABLE = 3  # mylist.json missing, unreadable or malformed: nothing was planned
 
 
 def _rules(raw: str) -> frozenset[Rule]:
@@ -58,16 +63,17 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # no line per HTTP request; runs log their own summary
     if args.command == "healthcheck":  # needs no backend settings
         return healthcheck(os.environ)
     try:
         settings = Settings.from_env(os.environ)
     except ValueError as exc:
         print(f"config error: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_CONFIG
     if args.command == "serve":
         serve(settings)
-        return 0
+        return EXIT_OK
     apply = args.command == "apply"
     try:
         result = run_once(
@@ -81,12 +87,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (ShokoError, PlexError) as exc:
         print(f"run failed: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_RUN_FAILED
     except Exception as exc:  # noqa: BLE001 - messages may carry URLs/tokens: print the type only
         print(f"run failed: {type(exc).__name__}", file=sys.stderr)
-        return 2
+        return EXIT_RUN_FAILED
     print(f"report: {result.report_path}")
-    return 2 if result.counts.get(Status.FAILED) else 0
+    if result.snapshot == SnapshotState.UNAVAILABLE:
+        print(f"snapshot unavailable: {result.detail}", file=sys.stderr)
+        return EXIT_SNAPSHOT_UNAVAILABLE
+    return EXIT_RUN_FAILED if result.counts.get(Status.FAILED) else EXIT_OK
 
 
 if __name__ == "__main__":

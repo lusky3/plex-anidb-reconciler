@@ -5,7 +5,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
+
 from plex_anidb_reconciler.models import R2bPolicy
+
+# Planning reads (the Shoko file index can be large and slow to build) wait up to 60 s for data.
+PLAN_TIMEOUT = httpx.Timeout(connect=10, read=60, write=30, pool=10)
+# Every request on the write path (the re-reads right before a write, the Shoko PUT, the Plex scrobble) takes
+# typically up to pool + connect + write + read = 25 s, which the default SHUTDOWN_GRACE_S of 25 s covers. httpx applies
+# each limit per phase and the read limit per chunk, so this is a typical bound, not a hard deadline.
+WRITE_PATH_TIMEOUT = httpx.Timeout(connect=5, read=10, write=5, pool=5)
 
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN", "PLEX_SECTIONS")
 
@@ -34,12 +43,9 @@ def _parse_sections(raw: str) -> tuple[int, ...]:
     out: list[int] = []
     for part in raw.split(","):
         part = part.strip()
-        try:
-            value = int(part, 10)
-        except ValueError:
-            raise ValueError("PLEX_SECTIONS must be comma-separated positive integers") from None
-        if value < 1:
+        if not _is_ascii_int(part) or int(part, 10) < 1:
             raise ValueError("PLEX_SECTIONS must be comma-separated positive integers")
+        value = int(part, 10)
         if value not in out:
             out.append(value)
     return tuple(out)
@@ -102,6 +108,7 @@ class Settings:
     listen: str
     shutdown_grace_s: int = 25
     run_stale_minutes: int = 360  # an active run longer than this makes /healthz stale
+    health_max_failed_runs: int = 3  # this many failed runs in a row make /healthz return 503
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -146,4 +153,5 @@ class Settings:
             listen=listen,
             shutdown_grace_s=_int(env, "SHUTDOWN_GRACE_S", 25, 0),
             run_stale_minutes=_int(env, "RUN_STALE_MINUTES", 360, 1),
+            health_max_failed_runs=_int(env, "HEALTH_MAX_FAILED_RUNS", 3, 1),
         )

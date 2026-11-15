@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT
 from plex_anidb_reconciler.models import PlexItem
 
 PAGE_SIZE = 500
@@ -14,7 +15,7 @@ OWNER_ACCOUNT_ID = 1
 
 
 class PlexError(Exception):
-    """Plex request failed. Messages never contain the token."""
+    """Plex request failed. Messages name the backend, method and host-less path, never the token."""
 
 
 def _utc(epoch: object) -> datetime:
@@ -25,7 +26,7 @@ def _utc(epoch: object) -> datetime:
 
 def _bad_body(path: str, exc: Exception) -> PlexError:
     """Malformed 2xx body: name the exception type only (values may echo request data)."""
-    return PlexError(f"GET {path} returned an unexpected body ({type(exc).__name__})")
+    return PlexError(f"Plex GET {path} returned an unexpected body ({type(exc).__name__})")
 
 
 def _parse_episode(m: dict, section: int) -> PlexItem:
@@ -72,15 +73,21 @@ class PlexClient:
         self._headers = {"X-Plex-Token": token, "Accept": "application/json"}
 
     def _request(
-        self, path: str, params: dict[str, str], extra_headers: dict[str, str] | None = None
+        self,
+        path: str,
+        params: dict[str, str],
+        extra_headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
     ) -> httpx.Response:
+        """GET with the client's timeout, or ``timeout`` if given."""
         headers = {**self._headers, **(extra_headers or {})}
+        extra = {} if timeout is None else {"timeout": timeout}
         try:
-            resp = self._client.get(f"{self.base_url}{path}", params=params, headers=headers)
+            resp = self._client.get(f"{self.base_url}{path}", params=params, headers=headers, **extra)
         except httpx.HTTPError as exc:
-            raise PlexError(f"GET {path} failed: {type(exc).__name__}") from None
+            raise PlexError(f"Plex GET {path} failed: {type(exc).__name__}") from None
         if not resp.is_success:
-            raise PlexError(f"GET {path} returned HTTP {resp.status_code}")
+            raise PlexError(f"Plex GET {path} returned HTTP {resp.status_code}")
         return resp
 
     def _paged(self, path: str, params: dict[str, str], signature: Callable[[dict], object]) -> list[dict]:
@@ -96,13 +103,13 @@ class PlexClient:
                 return out
             page = tuple(signature(m) if isinstance(m, dict) else None for m in items)
             if page == previous:
-                raise PlexError(f"GET {path} pagination did not advance")
+                raise PlexError(f"Plex GET {path} pagination did not advance")
             previous = page
             out.extend(items)
             start += len(items)
             if len(items) < PAGE_SIZE or (total is not None and start >= total):
                 return out
-        raise PlexError(f"GET {path} pagination exceeded {MAX_PAGES} pages")
+        raise PlexError(f"Plex GET {path} pagination exceeded {MAX_PAGES} pages")
 
     def list_episodes(self, section: int) -> list[PlexItem]:
         path = f"/library/sections/{section}/all"
@@ -126,4 +133,5 @@ class PlexClient:
         return {rk: sorted(v) for rk, v in grouped.items()}
 
     def mark_played(self, rating_key: str) -> None:
-        self._request("/:/scrobble", {"key": rating_key, "identifier": "com.plexapp.plugins.library"})
+        params = {"key": rating_key, "identifier": "com.plexapp.plugins.library"}
+        self._request("/:/scrobble", params, timeout=WRITE_PATH_TIMEOUT)

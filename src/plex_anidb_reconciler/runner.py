@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.config import PLAN_TIMEOUT, Settings
 from plex_anidb_reconciler.ledger import Ledger, iso_utc
 from plex_anidb_reconciler.models import (
     Action,
@@ -57,6 +57,7 @@ class RunResult:
     counts: dict[str, int]
     report_path: Path
     snapshot: SnapshotState = SnapshotState.OK
+    detail: str = ""  # why the snapshot is unavailable: its path and the kind of problem, never its content
 
 
 @dataclass(frozen=True)
@@ -193,14 +194,17 @@ def _fetch_plex(settings: Settings, plex: PlexClient) -> tuple[list[PlexItem], d
     return items, history
 
 
-def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | None:
-    """The MyList snapshot and whether it is fresh enough for R2/R2b, or None if it cannot be read."""
+def _load_snapshot(settings: Settings, now: datetime) -> Snapshot | str:
+    """The MyList snapshot and whether it is fresh enough for R2/R2b, or why it cannot be used (the path and
+    the kind of problem; SnapshotError messages never quote the file's content)."""
     path = Path(settings.mylist_path)
     try:
         entries = load_mylist(path)
         age = snapshot_age(path, now)
-    except SnapshotError, OSError:
-        return None
+    except SnapshotError as exc:
+        return str(exc)
+    except OSError as exc:
+        return f"{path}: cannot read snapshot ({exc.strerror or type(exc).__name__})"
     return Snapshot(MyListIndex(entries), snapshot_is_fresh(age, timedelta(hours=settings.snapshot_max_age_h)))
 
 
@@ -215,7 +219,7 @@ def _plan_actions(env: RunEnv, snapshot: Snapshot) -> list[Action]:
         snapshot.index,
         env.settings.r2b_policy,
         snapshot.fresh,
-        r1_marked=env.ledger.applied_r1_keys(),
+        r1_marked=env.ledger.r1_marked_keys(),
         pending=env.ledger.applied_sets(),
     )
 
@@ -263,15 +267,27 @@ def _mark_played(action: Action, clients: Clients) -> Outcome:
     return Outcome(action, Status.APPLIED, before=before, after={"plex_played": True})
 
 
-def _set_watched(action: Action, clients: Clients, file_id: int, when: datetime) -> Outcome:
+def _stopping(stop: threading.Event | None) -> bool:
+    return stop is not None and stop.is_set()
+
+
+def _set_watched(
+    action: Action, clients: Clients, file_id: int, when: datetime, stop: threading.Event | None = None
+) -> Outcome:
+    """Re-check the file, read UserStats, then PUT. A shutdown that arrives between those requests skips the
+    rest (nothing written), so after SIGTERM at most one request on this path is still in flight."""
     stats: ShokoUserStats | None = None
     try:
         if _shoko_changed(action, clients.shoko.get_file(file_id)):
             return Outcome(action, Status.FAILED, "shoko_changed", before=_shoko_audit(None))
+        if _stopping(stop):
+            return Outcome(action, Status.SKIPPED, "shutdown")
         stats = clients.shoko.get_user_stats(file_id)
         if stats.watched:
             # Shoko already has a watched date for this file: never overwrite it (not a failure)
             return Outcome(action, Status.SKIPPED, "shoko_already_watched")
+        if _stopping(stop):
+            return Outcome(action, Status.SKIPPED, "shutdown")
         clients.shoko.set_watched(file_id, when)
     except ShokoError as exc:
         return Outcome(action, Status.FAILED, str(exc), before=_shoko_audit(stats))
@@ -279,12 +295,12 @@ def _set_watched(action: Action, clients: Clients, file_id: int, when: datetime)
     return Outcome(action, Status.APPLIED, before=_shoko_audit(stats), after=written)
 
 
-def _execute(action: Action, clients: Clients) -> Outcome:
+def _execute(action: Action, clients: Clients, stop: threading.Event | None = None) -> Outcome:
     """Perform one write. Raises ValueError for an action the planner can never produce."""
     if action.kind is ActionKind.MARK_PLEX_PLAYED and action.rating_key is not None:
         return _mark_played(action, clients)
     if action.kind is ActionKind.SET_FILE_WATCHED and action.file_id is not None and action.when is not None:
-        return _set_watched(action, clients, action.file_id, action.when)
+        return _set_watched(action, clients, action.file_id, action.when, stop)
     raise ValueError("not an executable action")
 
 
@@ -332,7 +348,7 @@ class _Executor:
             return Outcome(action, Status.SKIPPED, "prerequisite_not_applied")  # CSV only; reconsidered next run
         if not self._apply:
             return Outcome(action, Status.DRY_RUN)
-        if self._stop is not None and self._stop.is_set():
+        if _stopping(self._stop):
             return Outcome(action, Status.SKIPPED, "shutdown")  # CSV only; re-planned next run
         if self._budget <= 0:
             return Outcome(action, Status.CAPPED)
@@ -345,15 +361,21 @@ class _Executor:
         return self._set_status.get(action.depends_on_file_id) == success
 
     def _write(self, action: Action) -> Outcome:
-        outcome = _execute(action, self._clients)
-        if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row
+        # R1: a pending ledger row goes in before the scrobble, so a crash right after Plex applied it still
+        # leaves the item marked as the reconciler's (its lastViewedAt is then never used as an AniDB date).
+        pending = self._ledger.start(self._run_id, action) if action.kind is ActionKind.MARK_PLEX_PLAYED else None
+        outcome = _execute(action, self._clients, self._stop)
+        if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row (R1 never skips)
             return outcome
         self._budget -= 1
         self.shoko_changed += outcome.detail == "shoko_changed"
         outcome = replace(outcome, before=self._audit_before(outcome))
-        self._ledger.record(
-            self._run_id, action, outcome.status, outcome.detail, before=outcome.before, after=outcome.after
-        )
+        if pending is not None:
+            self._ledger.finish(pending, outcome.status, outcome.detail, before=outcome.before, after=outcome.after)
+        else:
+            self._ledger.record(
+                self._run_id, action, outcome.status, outcome.detail, before=outcome.before, after=outcome.after
+            )
         return outcome
 
     def _audit_before(self, outcome: Outcome) -> dict[str, object]:
@@ -385,7 +407,7 @@ def _open_clients(settings: Settings, clients: Clients | None) -> Iterator[Clien
     if clients is not None:
         yield clients
         return
-    with httpx.Client(timeout=60) as http:
+    with httpx.Client(timeout=PLAN_TIMEOUT) as http:
         yield build_clients(settings, http)
 
 
@@ -396,21 +418,22 @@ def _finish(outcomes: list[Outcome], report_path: Path, file_state: FileStateLoo
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 
-def _snapshot_unavailable(run_id: str, report_path: Path) -> RunResult:
+def _snapshot_unavailable(run_id: str, report_path: Path, reason: str) -> RunResult:
     _finish([], report_path)
-    print("snapshot_unavailable: no actions planned")
-    log.warning("run %s: MyList snapshot unavailable, no actions planned", run_id)
-    return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE)
+    print(f"snapshot_unavailable: {reason}; no actions planned")
+    log.warning("run %s: MyList snapshot unavailable (%s), no actions planned", run_id, reason)
+    return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE, reason)
 
 
 def _summarise(run: RunInfo, outcomes: list[Outcome], shoko_changed: int, fresh: bool) -> RunResult:
     print(summarize(outcomes))
-    counts: dict[str, int] = dict(Counter(o.status for o in outcomes))
+    counts: dict[str, int] = dict(Counter(o.status.value for o in outcomes))
     if shoko_changed:
         counts["shoko_changed"] = shoko_changed
     snapshot = SnapshotState.OK if fresh else SnapshotState.STALE
     mode = "apply" if run.apply else "plan"
-    log.info("run %s (%s, snapshot %s): %s", run.run_id, mode, snapshot, counts or "no actions")
+    tally = " ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no actions"
+    log.info("run %s (%s, snapshot %s): %s", run.run_id, mode, snapshot, tally)
     return RunResult(run.run_id, counts, run.report_path, snapshot)
 
 
@@ -435,8 +458,8 @@ def run_once(
     run_id = _new_run_id(now)
     run = RunInfo(run_id, Path(settings.data_dir) / "reports" / f"{run_id}.csv", apply)
     snapshot = _load_snapshot(settings, now)
-    if snapshot is None:
-        return _snapshot_unavailable(run_id, run.report_path)
+    if isinstance(snapshot, str):
+        return _snapshot_unavailable(run_id, run.report_path, snapshot)
 
     with (
         _open_clients(settings, clients) as active,

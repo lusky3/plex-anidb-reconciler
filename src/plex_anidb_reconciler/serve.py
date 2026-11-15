@@ -17,9 +17,11 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from plex_anidb_reconciler.config import Settings, parse_listen
-from plex_anidb_reconciler.models import Status
+from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT, Settings, parse_listen
+from plex_anidb_reconciler.models import SnapshotState, Status
+from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
+from plex_anidb_reconciler.shoko import ShokoError
 
 log = logging.getLogger(__name__)
 MAX_BODY = 1024 * 1024  # larger bodies get 413 and the connection is closed
@@ -42,7 +44,13 @@ class Service:
         self._pending_lock = threading.Lock()  # guards _event together with the pending scope below
         self._pending_full = False  # a pending trigger asked for a full run
         self._pending_keys: set[str] = set()  # rating keys of pending scoped triggers
-        self._state: dict = {"last_run_id": None, "last_status": None, "last_finished": None, "snapshot": None}
+        self._state: dict = {
+            "last_run_id": None,
+            "last_status": None,
+            "last_finished": None,
+            "snapshot": None,
+            "failed_runs": 0,  # consecutive runs that errored, had a failed write or found no snapshot
+        }
         self._state_lock = threading.Lock()
         self._heartbeat: datetime | None = None  # last loop iteration or finished run
         self._loop_thread: threading.Thread | None = None
@@ -91,10 +99,14 @@ class Service:
         return None if full else keys
 
     def health(self) -> dict:
+        """/healthz body. It has an ``unhealthy`` reason once HEALTH_MAX_FAILED_RUNS runs in a row failed."""
         with self._state_lock:  # one acquisition: loop, run_active_since and the last-run fields agree
             out = {**self._state, "loop": "ok" if self._healthy_locked() else "stale"}
             if self._run_started is not None:
                 out["run_active_since"] = self._run_started.astimezone(UTC).isoformat()
+        failed = out["failed_runs"]
+        if failed >= self.settings.health_max_failed_runs:
+            out["unhealthy"] = f"{failed} consecutive failed runs (last: {out['last_status']})"
         return out
 
     def run_pending_now(self, rating_keys: frozenset[str] | None = None) -> None:
@@ -115,7 +127,14 @@ class Service:
                 )
                 run_id = result.run_id
                 snapshot = getattr(result, "snapshot", None)
-                status = Status.FAILED.value if result.counts.get(Status.FAILED) else "ok"
+                if snapshot == SnapshotState.UNAVAILABLE:
+                    status = "snapshot_unavailable"
+                else:
+                    status = Status.FAILED.value if result.counts.get(Status.FAILED) else "ok"
+            except (ShokoError, PlexError) as exc:
+                status = f"error:{type(exc).__name__}"
+                # these messages hold backend, method, path and HTTP status or exception type: no URL or secret
+                log.error("reconcile run failed: %s", exc)
             except Exception as exc:  # noqa: BLE001 - daemon must survive any run failure
                 status = f"error:{type(exc).__name__}"  # type only: messages may contain URLs
                 log.error("reconcile run failed: %s", type(exc).__name__)
@@ -124,6 +143,7 @@ class Service:
                     self._state["last_run_id"] = run_id
                     self._state["snapshot"] = snapshot  # ok | stale | unavailable
                 self._state["last_status"] = status
+                self._state["failed_runs"] = 0 if status == "ok" else self._state["failed_runs"] + 1
                 self._state["last_finished"] = self._clock().isoformat()
                 self._heartbeat = self._clock()
                 self._run_started = None
@@ -180,7 +200,8 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
         def do_GET(self) -> None:
             if self.path == "/healthz":
                 body = service.health()
-                self._json(200 if body["loop"] == "ok" else 503, body)
+                ok = body["loop"] == "ok" and "unhealthy" not in body
+                self._json(200 if ok else 503, body)
             else:
                 self._json(404, {"error": "not found"})
 
@@ -274,7 +295,20 @@ def finish_shutdown(loop: threading.Thread, grace_s: float) -> bool:
     return True
 
 
+def warn_if_grace_too_short(settings: Settings) -> None:
+    """Warn when SHUTDOWN_GRACE_S can't cover one write-path request (pool + connect + send + reply timeouts)."""
+    t = WRITE_PATH_TIMEOUT
+    needed = (t.pool or 0) + (t.connect or 0) + (t.write or 0) + (t.read or 0)
+    if settings.shutdown_grace_s < needed:
+        log.warning(
+            "SHUTDOWN_GRACE_S=%s is below %.0f s: a write in flight at shutdown may be cut off and go unrecorded",
+            settings.shutdown_grace_s,
+            needed,
+        )
+
+
 def serve(settings: Settings) -> None:
+    warn_if_grace_too_short(settings)
     host, port = parse_listen(settings.listen)
     service = Service(settings)
     server = make_server(service, host, port)

@@ -17,6 +17,8 @@ class _Result:
     def __init__(self) -> None:
         self.counts: dict = {}
         self.report_path = Path("/tmp/report.csv")
+        self.snapshot = "ok"
+        self.detail = ""
 
 
 @pytest.fixture
@@ -46,3 +48,11 @@ def test_rating_key_can_repeat(captured):
 def test_without_rating_key_the_run_is_full(captured):
     assert cli.main(["plan"]) == 0
     assert captured[0]["rating_keys"] is None
+
+
+def test_serve_command_runs_the_service_and_exits_ok(captured, monkeypatch):
+    started = []
+    monkeypatch.setattr(cli, "serve", lambda settings: started.append(settings.plex_sections))
+    assert cli.main(["serve"]) == 0
+    assert started == [(3,)]
+    assert captured == []  # serve doesn't go through a one-shot run

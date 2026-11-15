@@ -86,7 +86,7 @@ def test_applied_r1_keys_and_pending_sets(tmp_path, open_ledger):
     led.record(
         "run", act(ActionKind.SET_FILE_WATCHED, "R2", "rk3", file_id=8, fid=99, eids=(60, 61), when=SET.when), "failed"
     )
-    assert led.applied_r1_keys() == frozenset({"rk1"})
+    assert led.r1_marked_keys() == frozenset({"rk1", "rk9"})  # a failed scrobble may still have landed in Plex
     assert led.applied_sets() == [PendingWatch(7, 12345, (50,), SET.when)]
 
 
@@ -125,3 +125,74 @@ def test_existing_ledger_without_before_after_is_migrated(tmp_path, open_ledger)
     led.close()
     again = open_ledger(p)  # opening a migrated ledger again is a no-op
     assert again._db.execute("SELECT COUNT(*), COUNT(before) FROM actions").fetchone() == (2, 1)
+
+
+# --- pending R1 rows: written before the scrobble, finished after it ---
+
+
+def test_pending_r1_counts_as_marked_but_not_as_seen(tmp_path, open_ledger):
+    led = open_ledger(tmp_path / "l.sqlite")
+    row = led.start("run", R1)
+    assert led.r1_marked_keys() == frozenset({"rk1"})
+    assert not led.seen_success(ActionKind.MARK_PLEX_PLAYED, "rk1")  # a crash before the scrobble: R1 may run again
+    led.finish(row, "applied", before={"plex_view_count": 0}, after={"plex_played": True})
+    assert led.seen_success(ActionKind.MARK_PLEX_PLAYED, "rk1")
+    assert led._db.execute("SELECT status, before, after FROM actions").fetchall() == [
+        ("applied", '{"plex_view_count": 0}', '{"plex_played": true}')
+    ]
+
+
+def test_failed_r1_still_counts_as_marked(tmp_path, open_ledger):
+    # A scrobble can time out after Plex applied it: its lastViewedAt must never become an AniDB date.
+    led = open_ledger(tmp_path / "l.sqlite")
+    led.finish(led.start("run", R1), "failed", "Plex GET /:/scrobble returned HTTP 401")
+    assert led.r1_marked_keys() == frozenset({"rk1"})
+    assert not led.seen_success(ActionKind.MARK_PLEX_PLAYED, "rk1")  # a really failed scrobble may be retried
+    assert led._db.execute("SELECT status, detail FROM actions").fetchall() == [
+        ("failed", "Plex GET /:/scrobble returned HTTP 401")
+    ]
+
+
+def test_pending_rows_survive_reopen(tmp_path, open_ledger):
+    p = tmp_path / "l.sqlite"
+    led = open_ledger(p)
+    led.start("run", R1)
+    led.close()
+    again = open_ledger(p)
+    assert again.r1_marked_keys() == frozenset({"rk1"})
+    assert again._db.execute("SELECT status FROM actions").fetchall() == [("pending",)]
+
+
+def test_pending_is_only_for_r1_and_finish_rejects_non_final_status(tmp_path, open_ledger):
+    led = open_ledger(tmp_path / "l.sqlite")
+    with pytest.raises(ValueError):
+        led.start("run", SET)
+    with pytest.raises(ValueError):
+        led.record("run", R1, "pending")
+    row = led.start("run", R1)
+    with pytest.raises(ValueError):
+        led.finish(row, "pending")
+
+
+def test_old_ledger_gets_pending_support_without_losing_rows(tmp_path, open_ledger):
+    p = tmp_path / "l.sqlite"
+    with closing(sqlite3.connect(p)) as conn:
+        conn.executescript(OLD_SCHEMA)
+        conn.commit()
+    led = open_ledger(p)
+    led.start("run", R1)
+    assert led.applied_sets() == [PendingWatch(7, 12345, (50,), datetime(2026, 1, 1, tzinfo=UTC))]
+    assert led.r1_marked_keys() == frozenset({"rk1"})
+
+
+def test_insert_without_row_id_raises(tmp_path, open_ledger):
+    from types import SimpleNamespace
+
+    led = open_ledger(tmp_path / "l.sqlite")
+    real = led._db
+    led._db = SimpleNamespace(execute=lambda *a: SimpleNamespace(lastrowid=None), commit=lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match="no row id"):
+            led.start("run", R1)
+    finally:
+        led._db = real

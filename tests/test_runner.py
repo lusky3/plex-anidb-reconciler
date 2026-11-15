@@ -51,7 +51,7 @@ def shoko_file(i, fid, eid):
     return {
         "ID": i,
         "AniDB": {"ID": fid, "ReleaseGroup": {"Name": f"Group {i}", "ShortName": f"G{i}"}},
-        "Created": "2025-01-01T00:00:00+00:00",
+        "Created": "2023-01-01T00:00:00+00:00",  # before every Plex date in these tests
         "Locations": [{"AbsolutePath": f"/p/{i}.mkv"}],
         "SeriesIDs": [{"SeriesID": {"ID": 1, "AniDB": 700 + i}, "EpisodeIDs": [{"AniDB": eid, "Source": "AniDB"}]}],
     }
@@ -292,7 +292,7 @@ def test_shoko_index_cached_and_ttl(env):
     go(env, apply=False, now=now.replace(minute=30))
     assert route.call_count == 1
     cache = json.loads((__import__("pathlib").Path(env["DATA_DIR"]) / "shoko_index.json").read_text())
-    assert cache["files"][0]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert cache["files"][0]["created_at"] == "2023-01-01T00:00:00+00:00"
     go(env, apply=False, now=now.replace(hour=14))
     assert route.call_count == 2
 
@@ -645,10 +645,10 @@ def test_config_error_output_has_no_secrets(env, monkeypatch, capsys):
     "exc",
     [
         lambda: __import__("plex_anidb_reconciler.shoko", fromlist=["x"]).ShokoError(
-            "GET /api/v3/File returned HTTP 500"
+            "Shoko GET /api/v3/File returned HTTP 500"
         ),
         lambda: __import__("plex_anidb_reconciler.plex", fromlist=["x"]).PlexError(
-            "GET /:/scrobble failed: ConnectError"
+            "Plex GET /:/scrobble failed: ConnectError"
         ),
         lambda: RuntimeError("apikey=SHOKOSECRET X-Plex-Token=PLEXSECRET"),
     ],
@@ -813,7 +813,7 @@ def test_user_stats_file_missing_404_fails_without_write(env):
     res = go(env, apply=True)
     assert put.call_count == 0
     assert res.counts == {"applied": 2, "failed": 1}
-    assert set_rows(res) == [("R2", "3", "failed", "GET /api/v3/File/3/UserStats returned HTTP 404")]
+    assert set_rows(res) == [("R2", "3", "failed", "Shoko GET /api/v3/File/3/UserStats returned HTTP 404")]
 
 
 @respx.mock
@@ -1016,3 +1016,212 @@ def test_triggered_dependent_r2b_skipped_until_its_prerequisite_is_applied(env):
     res = go(env, apply=True, rating_keys=frozenset({"a", "b"}))
     assert put_paths(put) == ["/api/v3/File/2/UserStats", "/api/v3/File/1/UserStats"]
     assert set_rows(res) == [("R2", "2", "applied", ""), ("R2b", "1", "applied", "")]
+
+
+# --- snapshot unavailable: reported with its reason, CLI exit 3 ---
+
+
+@pytest.mark.parametrize(
+    "breakage,problem",
+    [
+        ("missing", "cannot read snapshot"),
+        ("not_json", "invalid JSON"),
+        ("bad_entry", "malformed entr"),
+        ("directory", "cannot read snapshot"),
+    ],
+)
+@respx.mock
+def test_snapshot_unavailable_names_path_and_problem_not_content(env, capsys, caplog, breakage, problem):
+    scrobble, put = mock_servers()
+    path = Path(env["MYLIST_PATH"])
+    if breakage == "missing":
+        path.unlink()
+    elif breakage == "not_json":
+        path.write_text("CONTENTCANARY {", encoding="utf-8")
+    elif breakage == "bad_entry":
+        path.write_text(json.dumps([snap(1, 50, "CONTENTCANARY")]), encoding="utf-8")
+    else:
+        path.unlink()
+        path.mkdir()
+    with caplog.at_level("WARNING"):
+        res = go(env, apply=True)
+    assert res.snapshot == "unavailable"
+    assert str(path) in res.detail and problem in res.detail
+    out = capsys.readouterr().out
+    for text in (out, caplog.text):
+        assert str(path) in text and problem in text
+        assert "CONTENTCANARY" not in text
+    assert scrobble.call_count == 0 and put.call_count == 0
+
+
+@pytest.mark.parametrize("command", ["plan", "apply"])
+def test_cli_snapshot_unavailable_exits_3_with_reason(env, monkeypatch, capsys, command):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    os.remove(env["MYLIST_PATH"])
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: run_once(s, clients=clients(s), **kw))
+    assert cli.main([command]) == 3
+    err = capsys.readouterr().err
+    assert "snapshot unavailable" in err and env["MYLIST_PATH"] in err and "cannot read snapshot" in err
+
+
+# --- HTTP timeouts and shutdown: an in-flight write fits inside the default shutdown grace ---
+
+
+def _timeout(request):
+    return request.extensions["timeout"]
+
+
+def test_write_path_timeout_fits_inside_default_shutdown_grace():
+    from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT
+
+    t = WRITE_PATH_TIMEOUT
+    worst = t.connect + t.write + t.read  # one request: connect, send the body, wait for the reply
+    assert worst <= Settings.from_env({**ENV_MIN}).shutdown_grace_s
+    assert t.pool is not None and t.pool <= t.connect
+
+
+ENV_MIN = {"SHOKO_URL": SHOKO, "SHOKO_API_KEY": "k", "PLEX_URL": PLEX, "PLEX_TOKEN": "t", "PLEX_SECTIONS": "4"}
+
+
+@respx.mock
+def test_write_path_requests_use_the_short_timeout(env):
+    from plex_anidb_reconciler.config import PLAN_TIMEOUT, WRITE_PATH_TIMEOUT
+
+    scrobble, put = mock_servers()
+    stats = mock_user_stats({})
+    detail = mock_file_detail([shoko_file(1, 1, 50), shoko_file(2, 2, 51), shoko_file(3, 3, 52)])
+    s = Settings.from_env(env)
+    run_once(s, apply=True, limit=None, now=NOW)  # real clients from _open_clients
+    write_path = [scrobble.calls[0].request, put.calls[0].request, stats.calls[0].request, detail.calls[0].request]
+    assert all(_timeout(r) == WRITE_PATH_TIMEOUT.as_dict() for r in write_path)
+    assert _timeout(mock_servers.index.calls[0].request) == PLAN_TIMEOUT.as_dict()
+
+
+@respx.mock
+def test_stop_during_pre_write_reads_skips_the_put(env):
+    import threading
+
+    from plex_anidb_reconciler.models import Rule
+
+    _, put = mock_servers()
+    stop = threading.Event()
+    files = {f["ID"]: f for f in (shoko_file(1, 1, 50), shoko_file(2, 2, 51), shoko_file(3, 3, 52))}
+
+    def detail(request, file_id):
+        stop.set()  # SIGTERM arrives while the re-read before the write is in flight
+        return httpx.Response(200, json=files[int(file_id)])
+
+    respx.get(url__regex=rf"{SHOKO}/api/v3/File/(?P<file_id>\d+)(\?.*)?$").mock(side_effect=detail)
+    stats = mock_user_stats({})
+    res = go(env, apply=True, stop=stop, rules=frozenset({Rule.R2}))
+    assert put.call_count == 0 and stats.call_count == 0
+    assert set_rows(res) == [("R2", "3", "skipped", "shutdown")]
+    assert _query(Path(env["DATA_DIR"]) / "ledger.sqlite", "SELECT COUNT(*) FROM actions") == [(0,)]
+
+
+# --- logs: one readable summary line per run, no per-request httpx lines ---
+
+
+@respx.mock
+def test_run_summary_log_is_readable(env, caplog):
+    mock_servers()
+    with caplog.at_level("INFO"):
+        res = go(env, apply=True)
+    line = next(r.getMessage() for r in caplog.records if r.name == "plex_anidb_reconciler.runner")
+    assert line == f"run {res.run_id} (apply, snapshot ok): applied=3"
+
+
+def test_cli_silences_httpx_request_logs(env, monkeypatch):
+    import logging
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(cli, "run_once", lambda s, **kw: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.NOTSET)
+    cli.main(["plan"])
+    assert logging.getLogger("httpx").level >= logging.WARNING
+
+
+# --- R1 crash window: the ledger holds a pending row before the scrobble is sent ---
+
+
+class _Killed(BaseException):
+    """Stands in for the process dying mid-request (nothing in the runner catches it)."""
+
+
+@respx.mock
+def test_r1_ledger_row_is_pending_while_the_scrobble_is_in_flight(env):
+    scrobble, _ = mock_servers()
+    db = Path(env["DATA_DIR"]) / "ledger.sqlite"
+    seen = []
+
+    def scrobble_handler(request):
+        seen.append(_query(db, "SELECT rating_key, status FROM actions WHERE kind = 'mark_plex_played'"))
+        return httpx.Response(200)
+
+    scrobble.mock(side_effect=scrobble_handler)
+    go(env, apply=True)
+    assert seen == [[("a", "pending")], [("a", "applied"), ("b", "pending")]]
+    assert _query(db, "SELECT rating_key, status FROM actions WHERE kind = 'mark_plex_played' ORDER BY id") == [
+        ("a", "applied"),
+        ("b", "applied"),
+    ]
+
+
+def test_killed_during_scrobble_still_blocks_the_scrobble_date(env):
+    """The process dies after Plex applied the scrobble but before the ledger row was finished. The pending row
+    still marks the item as the reconciler's, so its lastViewedAt never becomes an AniDB date."""
+    env["SHOKO_INDEX_TTL_MIN"] = "0"
+    files = [shoko_file(1, 1, 50)]
+    write_mylist(env, [snap(999, 50, "2023-03-01T21:00:00-05:00"), snap(1, 50, None)])
+    with respx.mock:
+        scrobble, _, _ = mock_world(files, [plex_item("a", 1, 0)])
+
+        def killed(request):
+            raise _Killed
+
+        scrobble.mock(side_effect=killed)
+        with pytest.raises(_Killed):
+            go(env, apply=True, now=R1_TIME)
+    write_mylist(env, [snap(1, 50, None)])
+    with respx.mock:
+        _, put, _ = mock_world(files, [plex_item("a", 1, 1, int(R1_TIME.timestamp()))])
+        res = go(env, apply=True, now=R1_TIME + timedelta(days=30))
+    assert put.call_count == 0
+    rows = [(r["rule"], r["reason"], r["status"]) for r in _csv_dicts(res.report_path)]
+    assert rows == [("R4", "plex_marked_by_reconciler", "reported")]
+
+
+@respx.mock
+def test_stop_between_user_stats_and_put_skips_the_write(env, monkeypatch):
+    import threading
+
+    from plex_anidb_reconciler.shoko import ShokoClient
+
+    _, put = mock_servers()
+    stop = threading.Event()
+    original = ShokoClient.get_user_stats
+
+    def stats_then_sigterm(self, file_id):
+        result = original(self, file_id)
+        stop.set()  # SIGTERM arrives after the UserStats read, before the PUT
+        return result
+
+    monkeypatch.setattr(ShokoClient, "get_user_stats", stats_then_sigterm)
+    res = go(env, apply=True, stop=stop)
+    assert put.call_count == 0
+    sets = [r for r in _csv_dicts(res.report_path) if r["kind"] == "set_file_watched"]
+    assert sets and all((r["status"], r["detail"]) == ("skipped", "shutdown") for r in sets)
+
+
+def test_unreadable_snapshot_reports_the_os_error(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    def denied(path, now):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(runner, "snapshot_age", denied)
+    reason = runner._load_snapshot(Settings.from_env(env), NOW)
+    assert isinstance(reason, str)
+    assert reason.endswith("cannot read snapshot (Permission denied)")

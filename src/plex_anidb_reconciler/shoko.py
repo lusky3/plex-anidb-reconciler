@@ -5,11 +5,12 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT
 from plex_anidb_reconciler.models import ShokoFile, ShokoUserStats
 
 
 class ShokoError(Exception):
-    """Shoko request failed. Messages never contain the API key."""
+    """Shoko request failed. Messages name the backend, method and host-less path, never the API key."""
 
 
 PARSE_ERRORS = (ValueError, KeyError, TypeError, AttributeError)
@@ -17,7 +18,7 @@ PARSE_ERRORS = (ValueError, KeyError, TypeError, AttributeError)
 
 def _bad_body(path: str, exc: Exception) -> ShokoError:
     """Malformed 2xx body: name the exception type only (values may echo request data)."""
-    return ShokoError(f"GET {path} returned an unexpected body ({type(exc).__name__})")
+    return ShokoError(f"Shoko GET {path} returned an unexpected body ({type(exc).__name__})")
 
 
 def _opt_int(value: object) -> int | None:
@@ -126,12 +127,12 @@ class ShokoClient:
         try:
             return self._client.request(method, f"{self.base_url}{path}", headers=self._headers, **kwargs)
         except httpx.HTTPError as exc:
-            raise ShokoError(f"{method} {path} failed: {type(exc).__name__}") from None
+            raise ShokoError(f"Shoko {method} {path} failed: {type(exc).__name__}") from None
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         resp = self._send(method, path, **kwargs)
         if not resp.is_success:
-            raise ShokoError(f"{method} {path} returned HTTP {resp.status_code}")
+            raise ShokoError(f"Shoko {method} {path} returned HTTP {resp.status_code}")
         return resp
 
     def list_files(self) -> list[ShokoFile]:
@@ -155,7 +156,7 @@ class ShokoClient:
             "includeAbsolutePaths": "true",
             "includeDataFrom": "AniDB",
         }
-        resp = self._request("GET", f"/api/v3/File/{file_id}", params=params)
+        resp = self._request("GET", f"/api/v3/File/{file_id}", params=params, timeout=WRITE_PATH_TIMEOUT)
         try:
             return _parse_file(resp.json(), self.tz)
         except PARSE_ERRORS as exc:
@@ -169,11 +170,11 @@ class ShokoClient:
         yet: that is unwatched. Any other 404 (e.g. "No File entry for the given fileID"), any other error
         status, a transport error or a malformed 2xx body raises ShokoError."""
         path = f"/api/v3/File/{file_id}/UserStats"
-        resp = self._send("GET", path)
+        resp = self._send("GET", path, timeout=WRITE_PATH_TIMEOUT)
         if resp.status_code == 404 and _NO_USER_STATS in resp.text.lower():
             return ShokoUserStats(0, None)
         if not resp.is_success:
-            raise ShokoError(f"GET {path} returned HTTP {resp.status_code}")
+            raise ShokoError(f"Shoko GET {path} returned HTTP {resp.status_code}")
         try:
             return _parse_user_stats(resp.json(), self.tz)
         except PARSE_ERRORS as exc:
@@ -182,4 +183,4 @@ class ShokoClient:
     def set_watched(self, file_id: int, when: datetime) -> None:
         stamp = to_shoko_time(when, self.tz)
         body = {"WatchedCount": 1, "LastWatchedAt": stamp, "ResumePosition": None, "LastUpdatedAt": stamp}
-        self._request("PUT", f"/api/v3/File/{file_id}/UserStats", json=body)
+        self._request("PUT", f"/api/v3/File/{file_id}/UserStats", json=body, timeout=WRITE_PATH_TIMEOUT)
