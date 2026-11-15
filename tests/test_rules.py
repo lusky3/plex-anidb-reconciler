@@ -681,3 +681,35 @@ def test_eid_mismatch_blocks_r1():
     )
     acts = sc.run()
     assert [(a.kind, a.rule, a.reason, a.file_id) for a in acts] == [(ActionKind.REPORT, "R4", "eid_mismatch", 1)]
+
+
+# --- R2 file-age gate: a lastViewedAt fallback date must not predate Shoko's import of the file ---
+
+
+def test_r2_last_viewed_after_import_is_set():
+    acts = simple(items=[item("a", "/p/x.mkv", last=T2)], files=[shoko(1, 12345, [50], "/p/x.mkv", created=T1)]).run()
+    assert [(a.rule, a.when) for a in sets(acts)] == [("R2", T2)]
+
+
+def test_r2_last_viewed_equal_to_import_is_set():
+    acts = simple(items=[item("a", "/p/x.mkv", last=T2)], files=[shoko(1, 12345, [50], "/p/x.mkv", created=T2)]).run()
+    assert [(a.rule, a.when) for a in sets(acts)] == [("R2", T2)]
+
+
+def test_r2_last_viewed_before_import_reports_predates_file():
+    acts = simple(items=[item("a", "/p/x.mkv", last=T1)], files=[shoko(1, 12345, [50], "/p/x.mkv", created=T2)]).run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "predates_file")]
+    assert acts[0].when == T1
+
+
+def test_r2_last_viewed_without_import_time_reports_unknown_file_age():
+    acts = simple(items=[item("a", "/p/x.mkv", last=T2)], files=[shoko(1, 12345, [50], "/p/x.mkv", created=None)]).run()
+    assert sets(acts) == []
+    assert reports(acts) == [("R4", "unknown_file_age")]
+
+
+@pytest.mark.parametrize("created", [None, T3])
+def test_r2_history_plays_ignore_the_file_age_gate(created):
+    acts = simple(history={"a": [T1]}, files=[shoko(1, 12345, [50], "/p/x.mkv", created=created)]).run()
+    assert [(a.rule, a.when) for a in sets(acts)] == [("R2", T1)]

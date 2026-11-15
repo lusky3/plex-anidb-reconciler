@@ -51,7 +51,7 @@ def shoko_file(i, fid, eid):
     return {
         "ID": i,
         "AniDB": {"ID": fid, "ReleaseGroup": {"Name": f"Group {i}", "ShortName": f"G{i}"}},
-        "Created": "2025-01-01T00:00:00+00:00",
+        "Created": "2023-01-01T00:00:00+00:00",  # before every Plex date in these tests
         "Locations": [{"AbsolutePath": f"/p/{i}.mkv"}],
         "SeriesIDs": [{"SeriesID": {"ID": 1, "AniDB": 700 + i}, "EpisodeIDs": [{"AniDB": eid, "Source": "AniDB"}]}],
     }
@@ -292,7 +292,7 @@ def test_shoko_index_cached_and_ttl(env):
     go(env, apply=False, now=now.replace(minute=30))
     assert route.call_count == 1
     cache = json.loads((__import__("pathlib").Path(env["DATA_DIR"]) / "shoko_index.json").read_text())
-    assert cache["files"][0]["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert cache["files"][0]["created_at"] == "2023-01-01T00:00:00+00:00"
     go(env, apply=False, now=now.replace(hour=14))
     assert route.call_count == 2
 

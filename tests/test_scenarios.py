@@ -453,6 +453,25 @@ def test_s14_r1_marked_item_never_dates_anidb_with_the_scrobble(ctx):
     assert reasons(rows) == {("R4", "reported", "plex_marked_by_reconciler", "")}
 
 
+def test_s15_ledger_lost_and_file_reimported_after_r1_scrobble(ctx):
+    """R1 marks the item; the ledger is lost; the old release's watched entry leaves MyList; Shoko re-imports the
+    file after the scrobble. With no history row the only date is the scrobble, which predates the file's import:
+    report predates_file, never a SET."""
+    w, write_ml, run = ctx
+    write_ml([ml(999, 50, "2023-04-01T21:00:00+00:00"), ml(12345, 50)])
+    w.add_file(1, 12345, 50, "/shoko/a/e1.mkv")
+    w.add_item("rk1", ["/plex/a/e1.mkv"], views=0)
+    run()
+    assert w.scrobbles == ["rk1"]
+    (Path(run.env["DATA_DIR"]) / "ledger.sqlite").unlink()
+    write_ml([ml(12345, 50)])
+    del w.files[1]
+    w.add_file(2, 12345, 50, "/shoko/a/e1.mkv", created=(NOW + timedelta(minutes=5)).isoformat())
+    _, rows = run(at=NOW + timedelta(minutes=15))
+    assert w.puts == [] and w.scrobbles == ["rk1"] and not w.other_writes
+    assert reasons(rows) == {("R4", "reported", "predates_file", "")}
+
+
 def test_s2c_same_file_already_watched_real_replay_2026(ctx):
     """Same fid watched on AniDB 2025, Plex wiped, user really re-plays it in 2026 (history row) -> no write."""
     w, write_ml, run = ctx

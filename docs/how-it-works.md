@@ -35,7 +35,9 @@ marks it played. R1 marks an item at most once, because the ledger remembers it.
 afterwards, the tool leaves it unwatched and won't mark it again later.
 
 **R2** (Plex → AniDB) covers a watched Plex item where none of the file's episodes are watched in AniDB. The file
-gets the earliest owner play from Plex history as its view date, or `lastViewedAt` when there's no history.
+gets the earliest owner play from Plex history as its view date, or `lastViewedAt` when there's no history. That
+fallback has no file identity and may be a manual mark or a scrobble, so it only counts if it isn't earlier than the
+file's Shoko import time (`Created`).
 
 **R2b** handles a re-watch of a new release: the file's episodes are already watched in AniDB through another file.
 Here a play only counts if it came after both the latest AniDB view date of those episodes and the file's Shoko
@@ -56,8 +58,8 @@ For each Plex item, the first check that fails ends planning for it:
    `partial_episode` if only some of its episodes are watched; otherwise R2 (no episode watched) or R2b (all
    watched).
 
-R2 can report `no_date`, `plex_marked_by_reconciler` (the only date would be this tool's own R1 scrobble) or
-`stale_snapshot`. R2b has its own set: `unknown_file_age`, `ignore_policy`, `no_playback`, `stale_snapshot` and
+R2 can report `no_date`, `plex_marked_by_reconciler` (the only date would be this tool's own R1 scrobble),
+`unknown_file_age` or `predates_file` (see below) or `stale_snapshot`. R2b has its own set: `unknown_file_age`, `ignore_policy`, `no_playback`, `stale_snapshot` and
 `multiple_prerequisites`.
 
 Once every item is planned, the tool keeps one SET per Shoko file; if several Plex items plan one, the earliest date
@@ -112,7 +114,8 @@ Each report row and each write carries a reason; the `detail` column adds what h
 | `no_date` | R4 | Watched in Plex with no play history and no `lastViewedAt`. | Nothing usable; set it on anidb.net if you care. |
 | `plex_marked_by_reconciler` | R4 | The only date is this tool's own R1 scrobble. | Nothing; that date isn't a watch. |
 | `stale_snapshot` | R4, R2b | `mylist.json` is older than `SNAPSHOT_MAX_AGE_H`. | Run Shoko's MyList sync. |
-| `unknown_file_age` | R2b | Shoko has no import time for the file. | Nothing; R2b can't be dated safely. |
+| `predates_file` | R4 | No play history, and Plex's `lastViewedAt` is older than the file's Shoko import. | Nothing; that date belongs to an earlier file or mark. |
+| `unknown_file_age` | R4, R2b | Shoko has no import time for the file, and the date would need one. | Nothing; the file can't be dated safely. |
 | `ignore_policy` | R2b | `R2B_POLICY=ignore`. | Nothing. |
 | `no_playback` | R2b | No play after the AniDB date and the file's import. | Nothing. |
 | `multiple_prerequisites` | R2b | Would need several R2s of this run to land first. | Nothing; the next run decides. |
