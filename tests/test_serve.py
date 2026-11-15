@@ -814,7 +814,7 @@ def test_serve_real_client_errors_log_no_secrets(tmp_path, caplog):
             return_value=httpx.Response(401, text=leak)
         )
         svc.run_pending_now()
-    assert "reconcile run failed: GET /api/v3/File failed: ConnectError" in caplog.text
-    assert "reconcile run failed: GET /library/sections/4/all returned HTTP 401" in caplog.text
+    assert "reconcile run failed: Shoko GET /api/v3/File failed: ConnectError" in caplog.text
+    assert "reconcile run failed: Plex GET /library/sections/4/all returned HTTP 401" in caplog.text
     assert "PLEXSECRET" not in caplog.text and "SHOKOSECRET" not in caplog.text
     assert svc.health()["failed_runs"] == 2

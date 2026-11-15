@@ -67,6 +67,7 @@ def test_set_watched_error_raises():
     with pytest.raises(ShokoError) as exc:
         make_client().set_watched(7, datetime(2023, 3, 2, tzinfo=UTC))
     assert "SECRETKEY" not in str(exc.value)
+    assert str(exc.value) == "Shoko PUT /api/v3/File/7/UserStats returned HTTP 500"
 
 
 @respx.mock
@@ -159,7 +160,7 @@ def test_transport_error_hides_details():
     with pytest.raises(ShokoError) as exc:
         make_client().list_files()
     assert "SECRETKEY" not in str(exc.value)
-    assert "ConnectError" in str(exc.value)
+    assert str(exc.value) == "Shoko GET /api/v3/File failed: ConnectError"
 
 
 def test_to_shoko_time_summer_uses_edt_offset():

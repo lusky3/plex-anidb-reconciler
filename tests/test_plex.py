@@ -102,7 +102,7 @@ def test_transport_error_hides_details():
     with pytest.raises(PlexError) as ei:
         make_client().mark_played("1")
     assert TOKEN not in str(ei.value)
-    assert "ConnectError" in str(ei.value)
+    assert str(ei.value) == "Plex GET /:/scrobble failed: ConnectError"
 
 
 @respx.mock
@@ -251,3 +251,4 @@ def test_scrobble_non_2xx_raises_plex_error():
     with pytest.raises(PlexError, match="401") as ei:
         make_client().mark_played("1")
     assert TOKEN not in str(ei.value)
+    assert str(ei.value) == "Plex GET /:/scrobble returned HTTP 401"

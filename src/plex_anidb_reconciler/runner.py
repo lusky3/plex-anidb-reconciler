@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from plex_anidb_reconciler.config import Settings
+from plex_anidb_reconciler.config import PLAN_TIMEOUT, Settings
 from plex_anidb_reconciler.ledger import Ledger, iso_utc
 from plex_anidb_reconciler.models import (
     Action,
@@ -267,15 +267,27 @@ def _mark_played(action: Action, clients: Clients) -> Outcome:
     return Outcome(action, Status.APPLIED, before=before, after={"plex_played": True})
 
 
-def _set_watched(action: Action, clients: Clients, file_id: int, when: datetime) -> Outcome:
+def _stopping(stop: threading.Event | None) -> bool:
+    return stop is not None and stop.is_set()
+
+
+def _set_watched(
+    action: Action, clients: Clients, file_id: int, when: datetime, stop: threading.Event | None = None
+) -> Outcome:
+    """Re-check the file, read UserStats, then PUT. A shutdown that arrives between those requests skips the
+    rest (nothing written), so after SIGTERM at most one request on this path is still in flight."""
     stats: ShokoUserStats | None = None
     try:
         if _shoko_changed(action, clients.shoko.get_file(file_id)):
             return Outcome(action, Status.FAILED, "shoko_changed", before=_shoko_audit(None))
+        if _stopping(stop):
+            return Outcome(action, Status.SKIPPED, "shutdown")
         stats = clients.shoko.get_user_stats(file_id)
         if stats.watched:
             # Shoko already has a watched date for this file: never overwrite it (not a failure)
             return Outcome(action, Status.SKIPPED, "shoko_already_watched")
+        if _stopping(stop):
+            return Outcome(action, Status.SKIPPED, "shutdown")
         clients.shoko.set_watched(file_id, when)
     except ShokoError as exc:
         return Outcome(action, Status.FAILED, str(exc), before=_shoko_audit(stats))
@@ -283,12 +295,12 @@ def _set_watched(action: Action, clients: Clients, file_id: int, when: datetime)
     return Outcome(action, Status.APPLIED, before=_shoko_audit(stats), after=written)
 
 
-def _execute(action: Action, clients: Clients) -> Outcome:
+def _execute(action: Action, clients: Clients, stop: threading.Event | None = None) -> Outcome:
     """Perform one write. Raises ValueError for an action the planner can never produce."""
     if action.kind is ActionKind.MARK_PLEX_PLAYED and action.rating_key is not None:
         return _mark_played(action, clients)
     if action.kind is ActionKind.SET_FILE_WATCHED and action.file_id is not None and action.when is not None:
-        return _set_watched(action, clients, action.file_id, action.when)
+        return _set_watched(action, clients, action.file_id, action.when, stop)
     raise ValueError("not an executable action")
 
 
@@ -336,7 +348,7 @@ class _Executor:
             return Outcome(action, Status.SKIPPED, "prerequisite_not_applied")  # CSV only; reconsidered next run
         if not self._apply:
             return Outcome(action, Status.DRY_RUN)
-        if self._stop is not None and self._stop.is_set():
+        if _stopping(self._stop):
             return Outcome(action, Status.SKIPPED, "shutdown")  # CSV only; re-planned next run
         if self._budget <= 0:
             return Outcome(action, Status.CAPPED)
@@ -349,7 +361,7 @@ class _Executor:
         return self._set_status.get(action.depends_on_file_id) == success
 
     def _write(self, action: Action) -> Outcome:
-        outcome = _execute(action, self._clients)
+        outcome = _execute(action, self._clients, self._stop)
         if outcome.status is Status.SKIPPED:  # nothing was written: no cap use, no ledger row
             return outcome
         self._budget -= 1
@@ -389,7 +401,7 @@ def _open_clients(settings: Settings, clients: Clients | None) -> Iterator[Clien
     if clients is not None:
         yield clients
         return
-    with httpx.Client(timeout=60) as http:
+    with httpx.Client(timeout=PLAN_TIMEOUT) as http:
         yield build_clients(settings, http)
 
 

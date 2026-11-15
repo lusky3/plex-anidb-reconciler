@@ -645,10 +645,10 @@ def test_config_error_output_has_no_secrets(env, monkeypatch, capsys):
     "exc",
     [
         lambda: __import__("plex_anidb_reconciler.shoko", fromlist=["x"]).ShokoError(
-            "GET /api/v3/File returned HTTP 500"
+            "Shoko GET /api/v3/File returned HTTP 500"
         ),
         lambda: __import__("plex_anidb_reconciler.plex", fromlist=["x"]).PlexError(
-            "GET /:/scrobble failed: ConnectError"
+            "Plex GET /:/scrobble failed: ConnectError"
         ),
         lambda: RuntimeError("apikey=SHOKOSECRET X-Plex-Token=PLEXSECRET"),
     ],
@@ -813,7 +813,7 @@ def test_user_stats_file_missing_404_fails_without_write(env):
     res = go(env, apply=True)
     assert put.call_count == 0
     assert res.counts == {"applied": 2, "failed": 1}
-    assert set_rows(res) == [("R2", "3", "failed", "GET /api/v3/File/3/UserStats returned HTTP 404")]
+    assert set_rows(res) == [("R2", "3", "failed", "Shoko GET /api/v3/File/3/UserStats returned HTTP 404")]
 
 
 @respx.mock
@@ -1063,3 +1063,58 @@ def test_cli_snapshot_unavailable_exits_3_with_reason(env, monkeypatch, capsys, 
     assert cli.main([command]) == 3
     err = capsys.readouterr().err
     assert "snapshot unavailable" in err and env["MYLIST_PATH"] in err and "cannot read snapshot" in err
+
+
+# --- HTTP timeouts and shutdown: an in-flight write fits inside the default shutdown grace ---
+
+
+def _timeout(request):
+    return request.extensions["timeout"]
+
+
+def test_write_path_timeout_fits_inside_default_shutdown_grace():
+    from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT
+
+    t = WRITE_PATH_TIMEOUT
+    worst = t.connect + t.write + t.read  # one request: connect, send the body, wait for the reply
+    assert worst <= Settings.from_env({**ENV_MIN}).shutdown_grace_s
+    assert t.pool is not None and t.pool <= t.connect
+
+
+ENV_MIN = {"SHOKO_URL": SHOKO, "SHOKO_API_KEY": "k", "PLEX_URL": PLEX, "PLEX_TOKEN": "t", "PLEX_SECTIONS": "4"}
+
+
+@respx.mock
+def test_write_path_requests_use_the_short_timeout(env):
+    from plex_anidb_reconciler.config import PLAN_TIMEOUT, WRITE_PATH_TIMEOUT
+
+    scrobble, put = mock_servers()
+    stats = mock_user_stats({})
+    detail = mock_file_detail([shoko_file(1, 1, 50), shoko_file(2, 2, 51), shoko_file(3, 3, 52)])
+    s = Settings.from_env(env)
+    run_once(s, apply=True, limit=None, now=NOW)  # real clients from _open_clients
+    write_path = [scrobble.calls[0].request, put.calls[0].request, stats.calls[0].request, detail.calls[0].request]
+    assert all(_timeout(r) == WRITE_PATH_TIMEOUT.as_dict() for r in write_path)
+    assert _timeout(mock_servers.index.calls[0].request) == PLAN_TIMEOUT.as_dict()
+
+
+@respx.mock
+def test_stop_during_pre_write_reads_skips_the_put(env):
+    import threading
+
+    from plex_anidb_reconciler.models import Rule
+
+    _, put = mock_servers()
+    stop = threading.Event()
+    files = {f["ID"]: f for f in (shoko_file(1, 1, 50), shoko_file(2, 2, 51), shoko_file(3, 3, 52))}
+
+    def detail(request, file_id):
+        stop.set()  # SIGTERM arrives while the re-read before the write is in flight
+        return httpx.Response(200, json=files[int(file_id)])
+
+    respx.get(url__regex=rf"{SHOKO}/api/v3/File/(?P<file_id>\d+)(\?.*)?$").mock(side_effect=detail)
+    stats = mock_user_stats({})
+    res = go(env, apply=True, stop=stop, rules=frozenset({Rule.R2}))
+    assert put.call_count == 0 and stats.call_count == 0
+    assert set_rows(res) == [("R2", "3", "skipped", "shutdown")]
+    assert _query(Path(env["DATA_DIR"]) / "ledger.sqlite", "SELECT COUNT(*) FROM actions") == [(0,)]
