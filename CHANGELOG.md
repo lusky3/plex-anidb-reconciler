@@ -30,8 +30,8 @@ First public release.
 
 - The only writes are Shoko `PUT /api/v3/File/{id}/UserStats` and Plex `/:/scrobble`. Nothing is ever marked
   unwatched, and an existing Shoko or AniDB watched date is never overwritten.
-- An R1 is written to the ledger as `pending` before its Plex scrobble, so a crash mid-write can't turn the
-  scrobble time into an AniDB date.
+- An R1 is written to the ledger as `pending` before its Plex scrobble and still counts if the request fails, so
+  neither a crash mid-write nor a timed-out scrobble can turn the scrobble time into an AniDB date.
 - API key and token never appear in logs, error messages, reports or `/healthz`; config errors name the variable,
   not its value.
 - The image is distroless with no shell, runs as uid 10001 on a read-only root filesystem, and CI fails on any
