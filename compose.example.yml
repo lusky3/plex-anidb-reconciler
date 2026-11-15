@@ -19,6 +19,7 @@ services:
     # Keep above SHUTDOWN_GRACE_S (default 25 s).
     stop_grace_period: 30s
     # No published ports: /trigger is unauthenticated. Tautulli reaches :8787 over the shared network.
+    # The optional web UI (UI_LISTEN below) has its own port; let only your HTTPS reverse proxy reach it.
     networks:
       - media
     # <shoko-data> and <state-dir> are explained in docs/deployment.md. uid 10001 has to own /data
@@ -35,6 +36,9 @@ services:
       SHOKO_TZ: UTC
       # Plex path prefix = Shoko path prefix, ';'-separated for several roots.
       # PATH_MAP: /plex/anime=/shoko/anime
+      # Read-only web UI (docs/deployment.md#web-ui). Needs UI_TOKEN in .env.
+      # UI_LISTEN: 0.0.0.0:8788
+      # UI_TOKEN: ${UI_TOKEN:?set UI_TOKEN}
       # Secrets: from .env next to this file, or exported by your secret manager.
       SHOKO_API_KEY: ${SHOKO_API_KEY:?set SHOKO_API_KEY}
       PLEX_TOKEN: ${PLEX_TOKEN:?set PLEX_TOKEN}

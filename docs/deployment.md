@@ -249,6 +249,37 @@ run failed or the command line was invalid, and `3` when the MyList snapshot is 
 backend, method, path and HTTP status or exception type, never secrets or query strings.
 
 **Network.** `/trigger` has no authentication. Keep port 8787 unpublished and reachable only on the Docker network.
+The web UI listens on its own port (below), so exposing it doesn't expose `/trigger`. Each port serves at most 32
+connections at once and closes any client that takes longer than 30 s to send its request, so a slow or stuck
+client can't tie up the service.
+
+## Web UI
+
+`serve` can also run a read-only web UI. Set `UI_LISTEN` (e.g. `0.0.0.0:8788`) and `UI_TOKEN` (at least 32
+characters; `openssl rand -hex 32` works), then restart. The log shows `web UI on 0.0.0.0:8788`.
+
+The UI has four pages:
+
+- **Status:** the loop, the last run and the next poll, the MyList snapshot's age, ledger counts, and the settings
+  that shape a run, without any secret.
+- **Runs:** every kept report, whether it was a plan or an apply, full or scoped to one Tautulli item, plus a
+  filterable view of each and its CSV.
+- **Reported:** the R4 and R2b report rows of the latest full run grouped by reason, with what each reason means, what
+  to do about it, and how the count changed since the previous full run.
+- **Ledger:** every write pxar attempted with its before and after state, filterable by status, rule, run, Plex item
+  or Shoko file. Pending R1 rows are flagged on the status page.
+
+It never writes and never calls Plex, Shoko or AniDB. It reads the reports, the ledger (opened read-only) and the
+service's own state, and its pages carry no JavaScript. Any page you open costs at most a few file reads.
+
+Every request needs `UI_TOKEN`. A browser asks for it as a password, and any user name works; scripts can send
+`Authorization: Bearer <token>`. Basic auth sends the token in every request, so serve the UI over HTTPS only: publish
+`UI_LISTEN`'s port to your reverse proxy alone, not to the internet, and let the proxy terminate TLS. Forward auth in
+the proxy (Authelia, Authentik and the like) works on top of the token; pxar still asks for the token because anyone
+who reaches the port directly would skip the proxy.
+
+Reports written before this version have no meta file, so the UI shows their mode from their rows and their scope as
+`?`.
 
 ## Upgrading
 

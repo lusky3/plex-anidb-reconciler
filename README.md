@@ -55,7 +55,7 @@ Read the report, then work through the [deployment guide](docs/deployment.md) be
 | --- | --- |
 | `plan [--rules R] [--file-id N] [--rating-key K]` | Dry run. Writes a CSV/HTML report. Uncapped. |
 | `apply [--rules R] [--file-id N] [--rating-key K] [--limit N]` | Executes the plan, capped by `MAX_WRITES`. |
-| `serve` | Applies every `POLL_MINUTES` and on `POST /trigger`; serves `/healthz`. |
+| `serve` | Applies every `POLL_MINUTES` and on `POST /trigger`; serves `/healthz` and, with `UI_LISTEN`, a read-only web UI. |
 | `healthcheck` | Container probe: exit 0 if the local `/healthz` answers 200. |
 
 `--rules` takes a comma list of `R1`, `R2`, `R2b`; `--rating-key` (repeatable) limits the run to those Plex items. The image runs `serve` by default.
@@ -67,7 +67,7 @@ Read the report, then work through the [deployment guide](docs/deployment.md) be
 
 - [How it works](docs/how-it-works.md): matching, rules, safety checks, reason codes, accepted risks
 - [Configuration](docs/configuration.md): environment variables
-- [Deployment](docs/deployment.md): prerequisites, Shoko settings, rollout, operations, upgrading, recovery
+- [Deployment](docs/deployment.md): prerequisites, Shoko settings, rollout, operations, web UI, upgrading, recovery
 - [Development](docs/development.md): tests, image hardening, CI
 - [Changelog](CHANGELOG.md)
 

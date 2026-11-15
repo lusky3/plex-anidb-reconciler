@@ -22,6 +22,8 @@ Every setting comes from an environment variable.
 | `RUN_STALE_MINUTES` | `360` | A run active longer than this makes `/healthz` return 503 (>= 1) |
 | `HEALTH_MAX_FAILED_RUNS` | `3` | This many failed runs in a row make `/healthz` return 503 (>= 1) |
 | `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0); keep it at 20 or more |
+| `UI_LISTEN` | empty | Address of the read-only web UI, e.g. `0.0.0.0:8788`; empty turns it off |
+| `UI_TOKEN` | required with `UI_LISTEN` | Password for the web UI (secret): at least 32 printable ASCII characters |
 
 Required variables must be set and non-blank. A blank optional variable falls back to its default, with one
 exception: a blank `SHOKO_TZ` is an error.
@@ -39,5 +41,9 @@ limit applies to every chunk, not the whole response, so these are typical bound
 small JSON replies on this path usually finish well inside 25 s. The default `SHUTDOWN_GRACE_S` of 25 covers one of
 them in the normal case, and `serve` logs a warning at startup if you set it below 25. The reads that plan a run wait up to 60 s for data, since a big Shoko file index can take
 a while.
+
+`UI_LISTEN` takes the same forms as `LISTEN` and needs a different port, so you can publish the UI without
+publishing `/trigger`. `UI_TOKEN` is ignored while `UI_LISTEN` is empty. `openssl rand -hex 32` makes a good one.
+See [the web UI](deployment.md#web-ui) for how to put it behind a reverse proxy.
 
 An invalid value stops the program with exit code 1 and a config error that names the variable, never its value.

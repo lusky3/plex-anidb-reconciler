@@ -208,3 +208,37 @@ def test_health_max_failed_runs_override_and_validation():
     assert Settings.from_env({**BASE, "HEALTH_MAX_FAILED_RUNS": "5"}).health_max_failed_runs == 5
     for raw in ("0", "-1", "1_0", "+2", "x"):
         assert "HEALTH_MAX_FAILED_RUNS" in _err(HEALTH_MAX_FAILED_RUNS=raw)
+
+
+# --- web UI ---
+
+UI_TOKEN = "t" * 32
+
+
+def test_ui_is_off_by_default_and_ignores_a_lone_token():
+    s = Settings.from_env({**BASE, "UI_TOKEN": UI_TOKEN})
+    assert (s.ui_listen, s.ui_token) == ("", "")
+
+
+def test_ui_settings_accepted_and_token_kept_out_of_repr():
+    s = Settings.from_env({**BASE, "UI_LISTEN": " 0.0.0.0:8788 ", "UI_TOKEN": f" {UI_TOKEN} "})
+    assert (s.ui_listen, s.ui_token) == ("0.0.0.0:8788", UI_TOKEN)
+    assert UI_TOKEN not in repr(s)
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"UI_LISTEN": "nope"}, "UI_LISTEN must be host:port"),
+        ({"UI_LISTEN": "127.0.0.1:8787", "UI_TOKEN": UI_TOKEN}, "UI_LISTEN must use a different port than LISTEN"),
+        ({"UI_LISTEN": "[::1]:9000", "LISTEN": "0.0.0.0:9000", "UI_TOKEN": UI_TOKEN}, "different port"),
+        ({"UI_LISTEN": "0.0.0.0:8788"}, "UI_TOKEN must be set to at least 32 characters"),
+        ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "t" * 31}, "UI_TOKEN must be set to at least 32"),
+        ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "é" * 32}, "UI_TOKEN must be printable ASCII"),
+        ({"UI_LISTEN": "0.0.0.0:8788", "UI_TOKEN": "a\x07" * 16}, "UI_TOKEN must be printable ASCII"),
+    ],
+)
+def test_ui_settings_rejected_without_echoing_values(env, expected):
+    message = _err(**env)
+    assert expected in message
+    assert "t" * 31 not in message

@@ -30,7 +30,9 @@ from plex_anidb_reconciler.mylist import MyListIndex, SnapshotError, load_mylist
 from plex_anidb_reconciler.paths import PathMatcher
 from plex_anidb_reconciler.plex import PlexClient, PlexError
 from plex_anidb_reconciler.report import (
+    PARTIAL_SUFFIX,
     FileStateLookup,
+    RunMeta,
     no_file_state,
     prune_reports,
     summarize,
@@ -411,15 +413,41 @@ def _open_clients(settings: Settings, clients: Clients | None) -> Iterator[Clien
         yield build_clients(settings, http)
 
 
-def _finish(outcomes: list[Outcome], report_path: Path, file_state: FileStateLookup = no_file_state) -> None:
-    """Write the CSV and its HTML twin, then keep only the newest KEEP_REPORTS of each."""
-    write_report(outcomes, report_path, file_state)
+def run_meta(run: RunInfo, scope: RunScope, snapshot: SnapshotState) -> RunMeta:
+    return RunMeta(
+        run_id=run.run_id,
+        mode="apply" if run.apply else "plan",
+        full=scope.rating_keys is None,
+        snapshot=snapshot.value,
+        rules=tuple(sorted(scope.rules)) if scope.rules else None,
+        file_id=scope.file_id,
+    )
+
+
+def _finish(
+    outcomes: list[Outcome],
+    report_path: Path,
+    meta: RunMeta,
+    file_state: FileStateLookup = no_file_state,
+) -> None:
+    """Write the CSV, the run meta and the HTML twin, then keep only the newest KEEP_REPORTS of each.
+
+    The CSV goes to a temporary name and is renamed into place after the meta file exists, so a reader that lists
+    ``*.csv`` (the web UI) never sees a half-written report or one without its meta. The HTML comes last: if it
+    fails, the CSV is already there."""
+    partial = report_path.with_name(report_path.name + PARTIAL_SUFFIX)
+    try:
+        write_report(outcomes, partial, file_state)
+        meta.write(report_path.with_suffix(".json"))
+        partial.replace(report_path)
+    finally:
+        partial.unlink(missing_ok=True)
     write_html_report(outcomes, report_path.with_suffix(".html"), file_state)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 
-def _snapshot_unavailable(run_id: str, report_path: Path, reason: str) -> RunResult:
-    _finish([], report_path)
+def _snapshot_unavailable(run_id: str, report_path: Path, reason: str, meta: RunMeta) -> RunResult:
+    _finish([], report_path, meta)
     print(f"snapshot_unavailable: {reason}; no actions planned")
     log.warning("run %s: MyList snapshot unavailable (%s), no actions planned", run_id, reason)
     return RunResult(run_id, {"snapshot_unavailable": 1}, report_path, SnapshotState.UNAVAILABLE, reason)
@@ -456,16 +484,17 @@ def run_once(
     as skipped/shutdown (an in-flight write completes and gets recorded first).
     Dry runs are uncapped. Only applied/failed writes reach the ledger; everything goes to the CSV."""
     run_id = _new_run_id(now)
-    run = RunInfo(run_id, Path(settings.data_dir) / "reports" / f"{run_id}.csv", apply)
+    run = RunInfo(run_id, settings.reports_dir / f"{run_id}.csv", apply)
+    scope = RunScope(rules, file_id, rating_keys)
     snapshot = _load_snapshot(settings, now)
     if isinstance(snapshot, str):
-        return _snapshot_unavailable(run_id, run.report_path, snapshot)
+        meta = run_meta(run, scope, SnapshotState.UNAVAILABLE)
+        return _snapshot_unavailable(run_id, run.report_path, snapshot, meta)
 
     with (
         _open_clients(settings, clients) as active,
-        closing(Ledger(Path(settings.data_dir) / "ledger.sqlite")) as ledger,
+        closing(Ledger(settings.ledger_path)) as ledger,
     ):
-        scope = RunScope(rules, file_id, rating_keys)
         actions = [a for a in _plan_actions(RunEnv(settings, active, ledger, now), snapshot) if scope.lists(a)]
         executor = _Executor(
             run_id,
@@ -479,5 +508,6 @@ def run_once(
         reported = [Outcome(a, Status.REPORTED) for a in actions if a.kind is ActionKind.REPORT]
         outcomes = reported + executor.run(_execution_order(actions, scope))
 
-    _finish(outcomes, run.report_path, snapshot.index.file_state)
+    state = SnapshotState.OK if snapshot.fresh else SnapshotState.STALE
+    _finish(outcomes, run.report_path, run_meta(run, scope, state), snapshot.index.file_state)
     return _summarise(run, outcomes, executor.shoko_changed, snapshot.fresh)

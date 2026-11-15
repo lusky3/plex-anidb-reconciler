@@ -1,3 +1,5 @@
+import pytest
+
 from plex_anidb_reconciler.models import Action, ActionKind, Outcome
 from plex_anidb_reconciler.report import prune_reports, summarize
 
@@ -147,3 +149,55 @@ def test_csv_neutralises_formula_cells(tmp_path):
     )
     assert (rows[1]["reason"], rows[1]["detail"]) == ("'\tx", "'\rx")
     assert rows[1]["rule"] == "R4" and rows[1]["eids"] == ""  # ordinary and empty cells unchanged
+
+
+# --- run meta and partial reports ---
+
+
+def test_run_meta_round_trips(tmp_path):
+    from plex_anidb_reconciler.report import RunMeta
+
+    meta = RunMeta("20260101T000000Z-abcdef", "apply", False, "stale", ("R1", "R2"), 7)
+    meta.write(tmp_path / "m.json")
+    assert RunMeta.load(tmp_path / "m.json") == meta
+    plain = RunMeta("r", "plan", True, "ok")
+    plain.write(tmp_path / "p.json")
+    assert RunMeta.load(tmp_path / "p.json") == plain
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "[1]",
+        "{bad",
+        '{"run_id": "r", "mode": "dance", "full": true, "snapshot": "ok"}',
+        '{"run_id": "r", "mode": "plan", "full": 1, "snapshot": "ok"}',
+        '{"run_id": "r", "mode": "plan", "full": true, "snapshot": null}',
+        '{"run_id": "r", "mode": "plan", "full": true, "snapshot": "ok", "rules": "R1"}',
+        '{"run_id": "r", "mode": "plan", "full": true, "snapshot": "ok", "file_id": true}',
+        '{"run_id": "r", "mode": "plan", "full": true, "snapshot": "ok", "file_id": "7"}',
+    ],
+)
+def test_run_meta_rejects_bad_files(tmp_path, data):
+    from plex_anidb_reconciler.report import RunMeta
+
+    (tmp_path / "m.json").write_text(data, encoding="utf-8")
+    assert RunMeta.load(tmp_path / "m.json") is None
+    assert RunMeta.load(tmp_path / "missing.json") is None
+
+
+@pytest.mark.parametrize(
+    ("cell", "value"),
+    [("'-ZR-", "-ZR-"), ("'=1+1", "=1+1"), ("'quoted", "'quoted"), ("plain", "plain"), ("'", "'"), ("", "")],
+)
+def test_csv_cell_value_undoes_the_formula_guard(cell, value):
+    from plex_anidb_reconciler.report import csv_cell_value
+
+    assert csv_cell_value(cell) == value
+
+
+def test_prune_removes_crash_leftover_partials_but_the_newest(tmp_path):
+    for name in ("20260101T000000Z-aaaaaa.csv.partial", "20260102T000000Z-bbbbbb.csv.partial"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    prune_reports(tmp_path, keep=5)
+    assert [p.name for p in tmp_path.iterdir()] == ["20260102T000000Z-bbbbbb.csv.partial"]

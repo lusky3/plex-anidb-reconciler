@@ -9,19 +9,20 @@ import ipaddress
 import json
 import logging
 import signal
-import socket
 import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 
 from plex_anidb_reconciler.config import WRITE_PATH_TIMEOUT, Settings, parse_listen
+from plex_anidb_reconciler.httpd import QuietHandler, bind
 from plex_anidb_reconciler.models import SnapshotState, Status
 from plex_anidb_reconciler.plex import PlexError
 from plex_anidb_reconciler.runner import run_once
 from plex_anidb_reconciler.shoko import ShokoError
+from plex_anidb_reconciler.webui import Pages, make_ui_server
 
 log = logging.getLogger(__name__)
 MAX_BODY = 1024 * 1024  # larger bodies get 413 and the connection is closed
@@ -109,6 +110,14 @@ class Service:
             out["unhealthy"] = f"{failed} consecutive failed runs (last: {out['last_status']})"
         return out
 
+    def next_poll(self) -> datetime | None:
+        """When the loop's next timed run starts unless a trigger comes first. None while a run is active
+        or before the loop has started."""
+        with self._state_lock:
+            if self._run_started is not None or self._heartbeat is None or self._loop_thread is None:
+                return None
+            return self._heartbeat + timedelta(minutes=max(self.settings.poll_minutes, 1))
+
     def run_pending_now(self, rating_keys: frozenset[str] | None = None) -> None:
         """Run one reconcile (blocking if one is in flight), limited to ``rating_keys`` if given. Never raises."""
         with self._lock:
@@ -183,9 +192,7 @@ def trigger_rating_key(body: bytes) -> str | None:
 
 
 def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
-        timeout = 10  # a stalled client cannot pin a handler thread
-
+    class Handler(QuietHandler):
         def _json(self, code: int, body: dict, close: bool = False) -> None:
             data = json.dumps(body).encode()
             self.send_response(code)
@@ -238,19 +245,7 @@ def make_server(service: Service, host: str, port: int) -> ThreadingHTTPServer:
             else:
                 self._json(404, {"error": "not found"})
 
-        def log_message(self, format: str, *args) -> None:
-            # Intentionally empty: silences BaseHTTPRequestHandler's per-request stderr access log
-            # (one line per /healthz probe). Runs are logged by the service itself.
-            pass
-
-    server_cls = ThreadingHTTPServer
-    if ":" in host:  # IPv6 literal (LISTEN=[addr]:port)
-
-        class V6Server(ThreadingHTTPServer):
-            address_family = socket.AF_INET6
-
-        server_cls = V6Server
-    return server_cls((host, port), Handler)
+    return bind(host, port, Handler)
 
 
 def health_url(listen: str | None) -> str:
@@ -307,17 +302,31 @@ def warn_if_grace_too_short(settings: Settings) -> None:
         )
 
 
+def start_ui(service: Service, settings: Settings) -> ThreadingHTTPServer | None:
+    """Start the read-only web UI on UI_LISTEN in a daemon thread, or return None when it is off."""
+    if not settings.ui_listen:
+        return None
+    host, port = parse_listen(settings.ui_listen)
+    ui = make_ui_server(Pages(service, settings), settings.ui_token, host, port)
+    threading.Thread(target=ui.serve_forever, name="web-ui", daemon=True).start()
+    log.info("web UI on %s", settings.ui_listen)
+    return ui
+
+
 def serve(settings: Settings) -> None:
     warn_if_grace_too_short(settings)
     host, port = parse_listen(settings.listen)
     service = Service(settings)
     server = make_server(service, host, port)
+    ui = start_ui(service, settings)
     stop = threading.Event()
 
     def shutdown(signum, frame) -> None:
         stop.set()  # an in-flight run also sees this and stops before its next write
         service.request_run()  # wake the loop; it exits after an in-flight run completes
         threading.Thread(target=server.shutdown, daemon=True).start()
+        if ui is not None:
+            threading.Thread(target=ui.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
@@ -328,3 +337,5 @@ def serve(settings: Settings) -> None:
     server.serve_forever()
     finish_shutdown(loop, settings.shutdown_grace_s)
     server.server_close()
+    if ui is not None:
+        ui.server_close()

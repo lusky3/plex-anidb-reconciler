@@ -1,10 +1,12 @@
-"""Per-run CSV and HTML reports and the stdout summary."""
+"""Per-run CSV and HTML reports, the run meta file and the stdout summary."""
 
 import csv
 import html
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from plex_anidb_reconciler.ledger import iso_utc
@@ -76,6 +78,13 @@ def _csv_safe(value: object) -> object:
     return value
 
 
+def csv_cell_value(cell: str) -> str:
+    """The original value of a report cell: undoes the ' that _csv_safe put in front of formula-like text."""
+    if cell.startswith("'") and cell[1:].startswith(_FORMULA_PREFIXES):
+        return cell[1:]
+    return cell
+
+
 def write_report(outcomes: list[Outcome], path: Path, file_state: FileStateLookup = no_file_state) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -116,10 +125,62 @@ def write_html_report(outcomes: list[Outcome], path: Path, file_state: FileState
     path.write_text(page, encoding="utf-8")
 
 
+@dataclass(frozen=True)
+class RunMeta:
+    """``<run_id>.json`` next to the CSV: what the CSV rows alone can't tell. The web UI reads it; nothing else
+    depends on it. ``full`` is False for a run scoped to some Plex items (a /trigger), whose report lists only
+    those items; ``rules``/``file_id`` limit writes only, so their reports still list everything."""
+
+    run_id: str
+    mode: str  # apply | plan
+    full: bool
+    snapshot: str  # SnapshotState value
+    rules: tuple[str, ...] | None = None
+    file_id: int | None = None
+
+    def write(self, path: Path) -> None:
+        data = {
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "full": self.full,
+            "snapshot": self.snapshot,
+            "rules": list(self.rules) if self.rules is not None else None,
+            "file_id": self.file_id,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: Path) -> RunMeta | None:
+        """The meta file at ``path``, or None if it is missing, unreadable or not a meta file."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        run_id, mode, full, snapshot = (data.get(k) for k in ("run_id", "mode", "full", "snapshot"))
+        rules, file_id = data.get("rules"), data.get("file_id")
+        if not (isinstance(run_id, str) and mode in ("apply", "plan") and isinstance(full, bool)):
+            return None
+        if not isinstance(snapshot, str):
+            return None
+        if rules is not None and not (isinstance(rules, list) and all(isinstance(r, str) for r in rules)):
+            return None
+        if file_id is not None and (not isinstance(file_id, int) or isinstance(file_id, bool)):
+            return None
+        return cls(run_id, mode, full, snapshot, tuple(rules) if rules is not None else None, file_id)
+
+
+PARTIAL_SUFFIX = ".partial"  # a CSV being written; renamed to <run_id>.csv once the run's other files exist
+
+
 def prune_reports(directory: Path, keep: int = 200) -> None:
-    """Keep the newest ``keep`` run reports of each format (CSV, HTML). Run ids start with a UTC timestamp,
-    so names sort by age."""
-    for pattern in ("*.csv", "*.html"):
+    """Keep the newest ``keep`` run reports of each format (CSV, HTML, meta JSON). Run ids start with a UTC
+    timestamp, so names sort by age. A CSV left half-written by a crash (``*.partial``) is removed too, unless
+    it is the newest one, which may still be in progress."""
+    _prune(directory, f"*{PARTIAL_SUFFIX}", 1)
+    for pattern in ("*.csv", "*.html", "*.json"):
         _prune(directory, pattern, keep)
 
 
