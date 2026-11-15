@@ -196,3 +196,8 @@ def test_run_stale_minutes_override_and_validation():
     assert Settings.from_env({**BASE, "RUN_STALE_MINUTES": "90"}).run_stale_minutes == 90
     for raw in ("0", "-5", "1_0", "x"):
         assert "RUN_STALE_MINUTES" in _err(RUN_STALE_MINUTES=raw)
+
+
+@pytest.mark.parametrize("raw", ["+3", "1_0", "٥", "５", "3,+7", "3,1_0"])
+def test_plex_sections_reject_non_ascii_decimal(raw):
+    assert "PLEX_SECTIONS" in _err(PLEX_SECTIONS=raw)

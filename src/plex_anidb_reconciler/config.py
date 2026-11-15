@@ -34,12 +34,9 @@ def _parse_sections(raw: str) -> tuple[int, ...]:
     out: list[int] = []
     for part in raw.split(","):
         part = part.strip()
-        try:
-            value = int(part, 10)
-        except ValueError:
-            raise ValueError("PLEX_SECTIONS must be comma-separated positive integers") from None
-        if value < 1:
+        if not _is_ascii_int(part) or int(part, 10) < 1:
             raise ValueError("PLEX_SECTIONS must be comma-separated positive integers")
+        value = int(part, 10)
         if value not in out:
             out.append(value)
     return tuple(out)
