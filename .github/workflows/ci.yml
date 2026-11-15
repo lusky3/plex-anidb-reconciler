@@ -151,15 +151,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Push by digest only: no tag points at the image until the checks below pass.
       - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           # No build cache here: the published image is built fresh, never from GHA cache entries that
@@ -190,3 +190,17 @@ jobs:
           echo "Provenance buildType: $prov"
           test "$sbom" != "null" && test -n "$sbom"
           test "$prov" != "null" && test -n "$prov"
+      # Only now do the release tags appear. With a single index as its source, imagetools create pushes that
+      # exact index (same digest, attestation manifests and annotations included); the check below enforces it.
+      - name: Tag the checked digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create -t "$tag" "$IMAGE@$DIGEST"
+            got=$(docker buildx imagetools inspect "$tag" --format '{{ json .Manifest.Digest }}' | tr -d '"')
+            echo "$tag -> $got"
+            test "$got" = "$DIGEST"
+          done <<<"$TAGS"
