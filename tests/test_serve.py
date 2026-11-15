@@ -50,7 +50,7 @@ class ObservedService(Service):
 def make_service(run_fn, clock=lambda: datetime(2026, 1, 1, tzinfo=UTC)):
     settings = SimpleNamespace(
         poll_minutes=15,
-        listen="127.0.0.1:0",
+        listen="127.0.0.1:8787",
         shutdown_grace_s=25,
         run_stale_minutes=360,
         health_max_failed_runs=3,
@@ -830,3 +830,37 @@ def test_short_shutdown_grace_logs_a_startup_warning(caplog, grace, warned):
     with caplog.at_level("WARNING"):
         warn_if_grace_too_short(SimpleNamespace(shutdown_grace_s=grace))
     assert ("SHUTDOWN_GRACE_S" in caplog.text) is warned
+
+
+def test_serve_warns_about_short_grace_then_runs_until_shutdown(caplog, monkeypatch):
+    from plex_anidb_reconciler import serve as serve_mod
+
+    events = []
+
+    class FakeServer:
+        def serve_forever(self):
+            events.append("serve_forever")
+
+        def server_close(self):
+            events.append("server_close")
+
+    class FakeService:
+        def __init__(self, settings):
+            pass
+
+        def request_run(self):
+            events.append("request_run")
+
+        def loop(self, stop):
+            events.append("loop")
+
+    monkeypatch.setattr(serve_mod, "Service", FakeService)
+    monkeypatch.setattr(serve_mod, "make_server", lambda service, host, port: FakeServer())
+    monkeypatch.setattr(serve_mod.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(serve_mod, "finish_shutdown", lambda loop, grace: events.append("finish_shutdown"))
+    settings = SimpleNamespace(shutdown_grace_s=5, listen="127.0.0.1:8787")
+    with caplog.at_level("WARNING"):
+        serve_mod.serve(settings)
+    assert "SHUTDOWN_GRACE_S=5" in caplog.text
+    assert events[0] == "request_run" and events[-2:] == ["finish_shutdown", "server_close"]
+    assert "serve_forever" in events

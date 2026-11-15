@@ -12,7 +12,8 @@ from plex_anidb_reconciler.models import R2bPolicy
 # Planning reads (the Shoko file index can be large and slow to build) wait up to 60 s for data.
 PLAN_TIMEOUT = httpx.Timeout(connect=10, read=60, write=30, pool=10)
 # Every request on the write path (the re-reads right before a write, the Shoko PUT, the Plex scrobble) takes
-# at most about pool + connect + write + read = 25 s, which the default SHUTDOWN_GRACE_S of 25 s covers.
+# typically up to pool + connect + write + read = 25 s, which the default SHUTDOWN_GRACE_S of 25 s covers. httpx applies
+# each limit per phase and the read limit per chunk, so this is a typical bound, not a hard deadline.
 WRITE_PATH_TIMEOUT = httpx.Timeout(connect=5, read=10, write=5, pool=5)
 
 REQUIRED = ("SHOKO_URL", "SHOKO_API_KEY", "PLEX_URL", "PLEX_TOKEN", "PLEX_SECTIONS")

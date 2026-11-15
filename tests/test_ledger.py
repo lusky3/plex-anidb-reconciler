@@ -183,3 +183,16 @@ def test_old_ledger_gets_pending_support_without_losing_rows(tmp_path, open_ledg
     led.start("run", R1)
     assert led.applied_sets() == [PendingWatch(7, 12345, (50,), datetime(2026, 1, 1, tzinfo=UTC))]
     assert led.r1_marked_keys() == frozenset({"rk1"})
+
+
+def test_insert_without_row_id_raises(tmp_path, open_ledger):
+    from types import SimpleNamespace
+
+    led = open_ledger(tmp_path / "l.sqlite")
+    real = led._db
+    led._db = SimpleNamespace(execute=lambda *a: SimpleNamespace(lastrowid=None), commit=lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match="no row id"):
+            led.start("run", R1)
+    finally:
+        led._db = real

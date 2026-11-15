@@ -237,9 +237,11 @@ backend, method, path and HTTP status or exception type.
 
 **Shutdown.** On SIGTERM, `serve` stops accepting triggers and tells an in-flight run to stop. No new write starts
 after that. A Shoko write still re-reading the file stops before its PUT, so at most one request is still in flight,
-and a request on the write path gives up after about 20–25 s for a normal-sized reply. The interrupted rows come out `skipped` with `shutdown`
-and get re-planned next run. `serve` waits up to `SHUTDOWN_GRACE_S` (25 s) for the run to end; a run that is still
+and a request on the write path normally finishes within about 25 s (its timeouts apply per phase, so a server that
+trickles its reply can take longer). The interrupted rows come out `skipped` with `shutdown` and get re-planned next run. `serve` waits up to `SHUTDOWN_GRACE_S` (25 s) for the run to end; a run that is still
 reading Plex or Shoko when the grace runs out gets cut off, which is harmless because it hasn't written anything yet.
+Completing the in-flight write is best effort: if that one request is still waiting on a slow reply when the grace
+ends, it can be cut off and go unrecorded, the same as a hard kill.
 Keep Docker's `stop_grace_period` above `SHUTDOWN_GRACE_S`; the example compose file uses 30 s.
 
 **Exit codes.** `plan` and `apply` exit `0` when the run went through, `1` on a config error, `2` when a write or the

@@ -1191,3 +1191,37 @@ def test_killed_during_scrobble_still_blocks_the_scrobble_date(env):
     assert put.call_count == 0
     rows = [(r["rule"], r["reason"], r["status"]) for r in _csv_dicts(res.report_path)]
     assert rows == [("R4", "plex_marked_by_reconciler", "reported")]
+
+
+@respx.mock
+def test_stop_between_user_stats_and_put_skips_the_write(env, monkeypatch):
+    import threading
+
+    from plex_anidb_reconciler.shoko import ShokoClient
+
+    _, put = mock_servers()
+    stop = threading.Event()
+    original = ShokoClient.get_user_stats
+
+    def stats_then_sigterm(self, file_id):
+        result = original(self, file_id)
+        stop.set()  # SIGTERM arrives after the UserStats read, before the PUT
+        return result
+
+    monkeypatch.setattr(ShokoClient, "get_user_stats", stats_then_sigterm)
+    res = go(env, apply=True, stop=stop)
+    assert put.call_count == 0
+    sets = [r for r in _csv_dicts(res.report_path) if r["kind"] == "set_file_watched"]
+    assert sets and all((r["status"], r["detail"]) == ("skipped", "shutdown") for r in sets)
+
+
+def test_unreadable_snapshot_reports_the_os_error(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    def denied(path, now):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(runner, "snapshot_age", denied)
+    reason = runner._load_snapshot(Settings.from_env(env), NOW)
+    assert isinstance(reason, str)
+    assert reason.endswith("cannot read snapshot (Permission denied)")
