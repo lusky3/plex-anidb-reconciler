@@ -89,10 +89,12 @@ class Ledger:
         return self._db.execute(query, (kind.value, key, Status.APPLIED)).fetchone() is not None
 
     def r1_marked_keys(self) -> frozenset[str]:
-        """Rating keys the reconciler marked played in Plex (R1), or may have: applied and pending rows."""
+        """Rating keys the reconciler marked played in Plex (R1), or may have: applied, pending and failed rows.
+
+        A failed scrobble counts too, because Plex may have applied it before the request timed out."""
         rows = self._db.execute(
-            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status IN (?, ?) AND rating_key IS NOT NULL",
-            (ActionKind.MARK_PLEX_PLAYED.value, Status.APPLIED, Status.PENDING),
+            "SELECT DISTINCT rating_key FROM actions WHERE kind = ? AND status IN (?, ?, ?) AND rating_key IS NOT NULL",
+            (ActionKind.MARK_PLEX_PLAYED.value, Status.APPLIED, Status.PENDING, Status.FAILED),
         )
         return frozenset(r[0] for r in rows)
 

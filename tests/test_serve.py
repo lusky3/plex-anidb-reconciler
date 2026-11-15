@@ -823,7 +823,7 @@ def test_serve_real_client_errors_log_no_secrets(tmp_path, caplog):
 # --- a shutdown grace shorter than one write-path request is warned about at startup ---
 
 
-@pytest.mark.parametrize("grace,warned", [(0, True), (19, True), (20, False), (25, False)])
+@pytest.mark.parametrize("grace,warned", [(0, True), (20, True), (24, True), (25, False), (30, False)])
 def test_short_shutdown_grace_logs_a_startup_warning(caplog, grace, warned):
     from plex_anidb_reconciler.serve import warn_if_grace_too_short
 

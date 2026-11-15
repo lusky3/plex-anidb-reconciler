@@ -296,9 +296,9 @@ def finish_shutdown(loop: threading.Thread, grace_s: float) -> bool:
 
 
 def warn_if_grace_too_short(settings: Settings) -> None:
-    """Warn when SHUTDOWN_GRACE_S can't cover one write-path request (connect + send + reply timeouts)."""
+    """Warn when SHUTDOWN_GRACE_S can't cover one write-path request (pool + connect + send + reply timeouts)."""
     t = WRITE_PATH_TIMEOUT
-    needed = (t.connect or 0) + (t.write or 0) + (t.read or 0)
+    needed = (t.pool or 0) + (t.connect or 0) + (t.write or 0) + (t.read or 0)
     if settings.shutdown_grace_s < needed:
         log.warning(
             "SHUTDOWN_GRACE_S=%s is below %.0f s: a write in flight at shutdown may be cut off and go unrecorded",

@@ -281,8 +281,8 @@ Losing the ledger also means the tool no longer knows that an item's Plex `lastV
 That date could only reach AniDB if all of these hold: the item has no Plex history row, Shoko has no watched date
 for the file, AniDB has since stopped showing the episode as watched, and Shoko imported the file before the
 scrobble. R2 never uses a `lastViewedAt` older than the file's import (`predates_file`), so a release imported after
-the scrobble is safe. A crash during the scrobble itself doesn't open this gap, because the R1 row is in the ledger
-as `pending` before the scrobble is sent.
+the scrobble is safe. A crash or timeout during the scrobble itself doesn't open this gap, because the R1 row is in
+the ledger as `pending` before the scrobble is sent and still counts after it ends as `failed`.
 
 ## Out of scope
 

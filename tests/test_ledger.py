@@ -86,7 +86,7 @@ def test_applied_r1_keys_and_pending_sets(tmp_path, open_ledger):
     led.record(
         "run", act(ActionKind.SET_FILE_WATCHED, "R2", "rk3", file_id=8, fid=99, eids=(60, 61), when=SET.when), "failed"
     )
-    assert led.r1_marked_keys() == frozenset({"rk1"})
+    assert led.r1_marked_keys() == frozenset({"rk1", "rk9"})  # a failed scrobble may still have landed in Plex
     assert led.applied_sets() == [PendingWatch(7, 12345, (50,), SET.when)]
 
 
@@ -142,10 +142,12 @@ def test_pending_r1_counts_as_marked_but_not_as_seen(tmp_path, open_ledger):
     ]
 
 
-def test_failed_r1_after_pending_is_no_longer_marked(tmp_path, open_ledger):
+def test_failed_r1_still_counts_as_marked(tmp_path, open_ledger):
+    # A scrobble can time out after Plex applied it: its lastViewedAt must never become an AniDB date.
     led = open_ledger(tmp_path / "l.sqlite")
     led.finish(led.start("run", R1), "failed", "Plex GET /:/scrobble returned HTTP 401")
-    assert led.r1_marked_keys() == frozenset()
+    assert led.r1_marked_keys() == frozenset({"rk1"})
+    assert not led.seen_success(ActionKind.MARK_PLEX_PLAYED, "rk1")  # a really failed scrobble may be retried
     assert led._db.execute("SELECT status, detail FROM actions").fetchall() == [
         ("failed", "Plex GET /:/scrobble returned HTTP 401")
     ]
