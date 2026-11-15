@@ -20,13 +20,22 @@ Every setting comes from an environment variable.
 | `SHOKO_INDEX_TTL_MIN` | `60` | Shoko file index cache TTL in minutes; `0` fetches every run |
 | `LISTEN` | `0.0.0.0:8787` | `serve` listen address: `host:port` or `[ipv6]:port` |
 | `RUN_STALE_MINUTES` | `360` | A run active longer than this makes `/healthz` return 503 (>= 1) |
-| `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0) |
+| `HEALTH_MAX_FAILED_RUNS` | `3` | This many failed runs in a row make `/healthz` return 503 (>= 1) |
+| `SHUTDOWN_GRACE_S` | `25` | Seconds `serve` waits for an in-flight run on SIGTERM (>= 0); keep it at 20 or more |
 
 Required variables must be set and non-blank. A blank optional variable falls back to its default, with one
 exception: a blank `SHOKO_TZ` is an error.
 
-`PLEX_SECTIONS` takes positive integers and drops duplicates. To find a section id, open the library in Plex Web and
-read `source=` in the URL. `PATH_MAP` sides get trimmed and must be non-empty; see
+`PLEX_SECTIONS` takes positive integers and drops duplicates; [deployment](deployment.md#prerequisites) shows how
+to list your section ids. `PATH_MAP` sides get trimmed and must be non-empty; see
 [deployment step 5](deployment.md#5-path-map). Integers must be plain decimal digits.
+
+A run counts as failed for `HEALTH_MAX_FAILED_RUNS` when it raises an error, has a failed write, or finds no usable
+MyList snapshot. One successful run resets the count.
+
+A request on the write path (the re-reads right before a write, the Shoko PUT, the Plex scrobble) gives up after
+about 20 seconds: 5 s to connect, 5 s to send, 10 s waiting for the reply. The default `SHUTDOWN_GRACE_S` of 25
+leaves room for one of them. The reads that plan a run wait up to 60 s for data, since a big Shoko file index can take
+a while.
 
 An invalid value stops the program with exit code 1 and a config error that names the variable, never its value.

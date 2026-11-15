@@ -25,10 +25,14 @@ fallback match. That file could be another show's same-named episode, so it land
 Several Shoko files on the same path or fallback key give R4 `ambiguous_path`; no hit at all gives R4
 `no_shoko_match`.
 
+Matching looks at file paths and nothing else, so it doesn't matter which agent or scanner built your Plex library:
+the native agent, Absolute Series Scanner and ShokoRelay all work.
+
 ## Rules
 
 **R1** (AniDB → Plex) fires when the Plex item is unwatched and every episode it covers is watched in AniDB. Plex
-marks it played.
+marks it played. R1 marks an item at most once, because the ledger remembers it. If you unmark the item in Plex
+afterwards, the tool leaves it unwatched and won't mark it again later.
 
 **R2** (Plex → AniDB) covers a watched Plex item where none of the file's episodes are watched in AniDB. The file
 gets the earliest owner play from Plex history as its view date, or `lastViewedAt` when there's no history.
@@ -61,7 +65,8 @@ wins. Two R2s of different files that share an episode conflict, since Plex hist
 earliest stays R2 and the tool re-plans the others as R2b against it.
 
 R2 and R2b need a snapshot younger than `SNAPSHOT_MAX_AGE_H`. An older one turns them into `stale_snapshot` reports,
-and with no snapshot at all the run plans nothing.
+and with no usable snapshot (missing, unreadable or malformed) the run plans nothing, logs why, and
+`plan`/`apply` exit with code 3.
 
 ## Execution
 
@@ -80,9 +85,47 @@ Right before each Shoko write the tool:
 
 Shoko 5.3.3 answers the UserStats GET of a never-watched file with HTTP 404 and `No FileUserStats entry for the given
 fileID for the current user`. The tool reads that as unwatched. Any other 404 or error fails the write without a PUT.
-A dry run never reads UserStats.
+A dry run never reads UserStats. If the service gets SIGTERM between these reads and the PUT, the write stops
+there with `skipped`/`shutdown` and nothing is sent.
 
 The tool reads naive dates from Shoko in `SHOKO_TZ`.
+
+## Reason codes
+
+Each report row and each write carries a reason; the `detail` column adds what happened at execution time.
+
+| Reason | Rule | Meaning | What to do |
+| --- | --- | --- | --- |
+| `anidb_episode_watched` | R1 | AniDB has every episode of this unwatched Plex item as watched; Plex gets marked played. | Nothing. |
+| `new_watch` | R2 | Watched in Plex, none of the file's episodes watched in AniDB; the file gets the first Plex play as its date. | Nothing. |
+| `rewatch_new_release` | R2b | A real replay of this release after the episode's AniDB date and after the file's import. | Nothing, or `R2B_POLICY=ignore` to stop these. |
+| `no_shoko_match` | R4 | No Shoko file at the rewritten path. | A handful is normal; many mean `PATH_MAP` is wrong. |
+| `ambiguous_path` | R4 | Several Shoko files share the path or fallback key. | Remove the duplicates in Shoko. |
+| `fallback_match` | R4 | Matched only by folder and filename. | Fix `PATH_MAP`; this should be zero. |
+| `unrecognised` | R4 | Shoko has no AniDB file id for the file. | Out of scope; Shoko has to recognise it first. |
+| `manual_link` | R4 | The file is linked to its episode by hand in Shoko. | Out of scope; never written. |
+| `no_episodes` | R4 | Shoko links the file to no AniDB episode. | Check the file in Shoko. |
+| `eid_mismatch` | R4 | AniDB and Shoko link the file to different episodes. | Fix the link in Shoko or on AniDB. |
+| `partial_episode` | R4 | Only some of the episodes involved are watched in AniDB. | Nothing; the tool won't guess. |
+| `multi_version` | R4 | A watched Plex item with several distinct files; Plex can't say which one was played. | Split or remove versions in Plex if you want it written. |
+| `not_in_snapshot` | R4 | The file isn't in MyList. | Check `AniDb.MyList_AddFiles`, then sync MyList. |
+| `no_date` | R4 | Watched in Plex with no play history and no `lastViewedAt`. | Nothing usable; set it on anidb.net if you care. |
+| `plex_marked_by_reconciler` | R4 | The only date is this tool's own R1 scrobble. | Nothing; that date isn't a watch. |
+| `stale_snapshot` | R4, R2b | `mylist.json` is older than `SNAPSHOT_MAX_AGE_H`. | Run Shoko's MyList sync. |
+| `unknown_file_age` | R2b | Shoko has no import time for the file. | Nothing; R2b can't be dated safely. |
+| `ignore_policy` | R2b | `R2B_POLICY=ignore`. | Nothing. |
+| `no_playback` | R2b | No play after the AniDB date and the file's import. | Nothing. |
+| `multiple_prerequisites` | R2b | Would need several R2s of this run to land first. | Nothing; the next run decides. |
+
+Detail values on write rows:
+
+| Detail | Status | Meaning | What to do |
+| --- | --- | --- | --- |
+| `shoko_already_watched` | `skipped` | Shoko already had a date for the file, so nothing was written. | Nothing; it stops once the snapshot shows the file watched. |
+| `shoko_changed` | `failed` | The file's fid, episodes or path changed since planning. | Nothing; the next run re-plans it. |
+| `prerequisite_not_applied` | `skipped` | The R2 this R2b depends on wasn't applied in this run. | Nothing; the next run looks again. |
+| `shutdown` | `skipped` | The service was stopping. | Nothing; re-planned next run. |
+| an error message, e.g. `Shoko PUT /api/v3/File/7/UserStats returned HTTP 500` | `failed` | The request failed. | Check the backend; the write is retried next run. |
 
 ## Reports and ledger
 
@@ -116,6 +159,9 @@ means a full run.
 
 Triggers that arrive mid-run merge into the next run: the union of their keys, or a full run if any of them was
 keyless.
+
+Tautulli's "Watched" threshold can fire before Plex has raised the item's `viewCount`. The triggered run then finds
+nothing to write, and the next poll picks the watch up.
 
 ## Accepted risks
 
