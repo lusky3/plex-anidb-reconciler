@@ -81,6 +81,8 @@ def data(tmp_path):
             reported("no_shoko_match", "2"),
             reported("no_shoko_match", "3"),
             reported("partial_episode", "4"),
+            reported("fallback_match", "6"),
+            reported("fallback_match", "8"),
         ],
     )
     write_run(
@@ -421,6 +423,8 @@ def test_reported_uses_the_latest_full_run_and_compares_with_the_previous(pages)
     assert '<span class="warn">+1</span>' in body  # new reasons
     assert "Only some of the episodes involved are watched in AniDB." in body
     assert "brand_new_reason" in body
+    assert '<span class="ok">-2</span>' in body  # fallback_match: 2 -> 0, still listed as fixed
+    assert body.index("no_shoko_match") < body.index("fallback_match")  # zero counts last
     assert "<h2>" not in body
 
 

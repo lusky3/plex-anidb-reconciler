@@ -431,11 +431,16 @@ def _finish(
     file_state: FileStateLookup = no_file_state,
     meta: dict[str, object] | None = None,
 ) -> None:
-    """Write the CSV, its HTML twin and the run meta, then keep only the newest KEEP_REPORTS of each."""
-    write_report(outcomes, report_path, file_state)
+    """Write the CSV, its HTML twin and the run meta, then keep only the newest KEEP_REPORTS of each.
+
+    The CSV goes to a temporary name first and is renamed into place last, so a reader that lists ``*.csv`` (the
+    web UI) never sees a half-written report, or a report whose meta file doesn't exist yet."""
+    partial = report_path.with_name(report_path.name + ".partial")
+    write_report(outcomes, partial, file_state)
     write_html_report(outcomes, report_path.with_suffix(".html"), file_state)
     if meta is not None:
         write_run_meta(report_path.with_suffix(".json"), meta)
+    partial.replace(report_path)
     prune_reports(report_path.parent, KEEP_REPORTS)
 
 

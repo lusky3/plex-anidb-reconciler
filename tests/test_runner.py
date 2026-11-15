@@ -939,6 +939,25 @@ def test_snapshot_unavailable_still_writes_html(env):
 
 
 @respx.mock
+def test_csv_is_published_last_so_readers_never_see_a_partial_report(env, monkeypatch):
+    from plex_anidb_reconciler import runner
+
+    mock_servers()
+    seen = []
+    real_meta = runner.write_run_meta
+
+    def meta_then_check(path, meta):
+        real_meta(path, meta)
+        seen.append(path.with_suffix(".csv").exists())
+
+    monkeypatch.setattr(runner, "write_run_meta", meta_then_check)
+    res = go(env, apply=False)
+    assert seen == [False]  # the CSV wasn't visible yet when the meta file was written
+    assert res.report_path.exists()
+    assert not list(res.report_path.parent.glob("*.partial"))
+
+
+@respx.mock
 def test_run_meta_records_mode_and_scope(env):
     mock_servers()
     plan = go(env, apply=False)

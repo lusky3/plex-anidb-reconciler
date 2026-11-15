@@ -724,7 +724,10 @@ class Pages:
             + ".</p>"
         )
         summary_rows = []
-        for (rule, why), n in sorted(latest.reasons.items(), key=lambda kv: (-kv[1], kv[0])):
+        # Reasons of the previous run too: one that dropped to zero shows as fixed (0 items, a negative change).
+        keys = set(latest.reasons) | set(previous.reasons if previous else ())
+        counts = {key: latest.reasons.get(key, 0) for key in keys}
+        for (rule, why), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
             meaning, todo = REASONS.get(why, ("", ""))
             change = "" if previous is None else self._change(n - previous.reasons.get((rule, why), 0))
             summary_rows.append(
